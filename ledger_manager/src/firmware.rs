@@ -26,8 +26,9 @@ use crate::{
     },
     device::{connect, list_ledger_devices, quit_app, wait_for_device, DeviceInfo},
     error::{Error, SocketContext},
+    hid::HidTransport,
     model::DeviceModel,
-    socket::{run_device_socket, socket_url, SocketEvent},
+    socket::{run_hsm_session, socket_url, SocketEvent, TimeoutTransport},
     version::{coerced_at_least, SemVer},
 };
 
@@ -88,6 +89,11 @@ pub struct FirmwareUpdateOptions {
     /// How long to wait for the device to disconnect after the OSU was installed, when no MCU
     /// needs to be flashed (Ledger Live's `potentialAutoFlash` step).
     pub disconnect_timeout: Duration,
+    /// How long to wait for the device to answer an APDU relayed from Ledger's HSM, except for
+    /// the APDUs which wait for the user (allowing the manager, confirming the update) which have
+    /// no timeout. Avoids hanging forever if the device stops answering in the middle of the
+    /// update.
+    pub apdu_timeout: Duration,
 }
 
 impl Default for FirmwareUpdateOptions {
@@ -98,6 +104,7 @@ impl Default for FirmwareUpdateOptions {
             // WITH_DEVICE_POLLING_DELAY
             poll_interval: Duration::from_millis(500),
             disconnect_timeout: Duration::from_secs(20),
+            apdu_timeout: Duration::from_secs(2 * 60),
         }
     }
 }
@@ -281,8 +288,10 @@ pub(crate) fn osu_step(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_firmware_socket<P: FnMut(FirmwareUpdateStep)>(
     hid_api: &mut HidApi,
+    options: &FirmwareUpdateOptions,
     target_id: u32,
     firmware: &str,
     perso: &str,
@@ -290,7 +299,11 @@ fn install_firmware_socket<P: FnMut(FirmwareUpdateStep)>(
     mut on_bulk: impl FnMut(usize, usize) -> FirmwareUpdateStep,
     progress: &mut P,
 ) -> Result<(), Error> {
-    let transport = connect(hid_api)?;
+    let hid = HidTransport::connect(hid_api)?;
+    let transport = TimeoutTransport {
+        transport: &hid,
+        timeout: options.apdu_timeout,
+    };
     let target_id = target_id.to_string();
     let url = socket_url(
         "install",
@@ -301,7 +314,7 @@ fn install_firmware_socket<P: FnMut(FirmwareUpdateStep)>(
             ("firmwareKey", firmware_key),
         ],
     );
-    run_device_socket(&transport, &url, SocketContext::Firmware, |e| match e {
+    run_hsm_session(&transport, &url, SocketContext::Firmware, |e| match e {
         SocketEvent::DevicePermissionRequested => {
             progress(FirmwareUpdateStep::AllowManagerRequested)
         }
@@ -325,8 +338,7 @@ fn wait_for_disconnect(hid_api: &mut HidApi, timeout: Duration, interval: Durati
     log::debug!("Device didn't disconnect after {:?}.", timeout);
 }
 
-/// Flash the MCU or the bootloader of a device in bootloader mode, retrying to connect to the
-/// device if it can't be opened (it may be rebooting).
+/// Flash the MCU or the bootloader of a device in bootloader mode, as needed for this update.
 fn flash_mcu_or_bootloader<P: FnMut(FirmwareUpdateStep)>(
     hid_api: &mut HidApi,
     device_info: &DeviceInfo,
@@ -341,16 +353,33 @@ fn flash_mcu_or_bootloader<P: FnMut(FirmwareUpdateStep)>(
     {
         flash_target(&device_info.maj_min, &[], &update.final_firmware, 1)?
     } else {
-        if mcus.is_none() {
-            *mcus = Some(fetch_mcus()?);
-        }
         flash_target(
             &device_info.maj_min,
-            mcus.as_deref().unwrap_or_default(),
+            cached_mcus(mcus)?,
             &update.final_firmware,
             device_info.provider_id(),
         )?
     };
+    install_mcu(hid_api, device_info, &target, options, progress)
+}
+
+/// Fetch the MCU versions from the Ledger API, once.
+fn cached_mcus(mcus: &mut Option<Vec<McuVersion>>) -> Result<&[McuVersion], Error> {
+    if mcus.is_none() {
+        *mcus = Some(fetch_mcus()?);
+    }
+    Ok(mcus.as_deref().unwrap_or_default())
+}
+
+/// Flash this MCU or bootloader version on a device in bootloader mode, retrying to connect to the
+/// device if it can't be opened (it may be rebooting).
+fn install_mcu<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    device_info: &DeviceInfo,
+    target: &FlashTarget,
+    options: &FirmwareUpdateOptions,
+    progress: &mut P,
+) -> Result<(), Error> {
     log::info!(
         "Flashing {} {} (bootloader version {}).",
         if target.is_mcu { "MCU" } else { "bootloader" },
@@ -367,8 +396,8 @@ fn flash_mcu_or_bootloader<P: FnMut(FirmwareUpdateStep)>(
     progress(step(0.0));
 
     let start = Instant::now();
-    let transport = loop {
-        match connect(hid_api) {
+    let hid = loop {
+        match HidTransport::connect(hid_api) {
             Ok(t) => break t,
             Err(e) if start.elapsed() < options.reboot_timeout => {
                 log::debug!("Could not open the device, retrying: {}", e);
@@ -377,12 +406,16 @@ fn flash_mcu_or_bootloader<P: FnMut(FirmwareUpdateStep)>(
             Err(e) => return Err(e),
         }
     };
+    let transport = TimeoutTransport {
+        transport: &hid,
+        timeout: options.apdu_timeout,
+    };
     let target_id = device_info.target_id.to_string();
     let url = socket_url(
         "mcu",
         &[("targetId", &target_id), ("version", &target.version)],
     );
-    run_device_socket(&transport, &url, SocketContext::Mcu, |e| {
+    run_hsm_session(&transport, &url, SocketContext::Mcu, |e| {
         if let Some(p) = e.bulk_progress() {
             progress(step(p));
         }
@@ -394,6 +427,7 @@ fn flash_mcu_or_bootloader<P: FnMut(FirmwareUpdateStep)>(
 /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/installFinalFirmware.ts
 fn install_final_firmware<P: FnMut(FirmwareUpdateStep)>(
     hid_api: &mut HidApi,
+    options: &FirmwareUpdateOptions,
     device_info: &DeviceInfo,
     progress: &mut P,
 ) -> Result<(), Error> {
@@ -413,6 +447,7 @@ fn install_final_firmware<P: FnMut(FirmwareUpdateStep)>(
     progress(FirmwareUpdateStep::InstallingFinal { progress: 0.0 });
     install_firmware_socket(
         hid_api,
+        options,
         device_info.target_id,
         &firmware,
         &next.perso,
@@ -482,6 +517,7 @@ pub fn update_firmware_with_options<P: FnMut(FirmwareUpdateStep)>(
         progress(FirmwareUpdateStep::InstallingOsu { progress: 0.0 });
         install_firmware_socket(
             hid_api,
+            options,
             device_info.target_id,
             &update.osu.firmware,
             &update.osu.perso,
@@ -555,7 +591,7 @@ pub fn update_firmware_with_options<P: FnMut(FirmwareUpdateStep)>(
         if !info.is_osu {
             return Err(Error::DeviceInOsuExpected);
         }
-        install_final_firmware(hid_api, &info, &mut progress)?;
+        install_final_firmware(hid_api, options, &info, &mut progress)?;
     }
 
     // Wait for the device to come back running the new firmware.

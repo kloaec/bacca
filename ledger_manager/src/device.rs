@@ -81,7 +81,9 @@ fn is_ledger_interface(dev: &ledger_transport_hidapi::hidapi::DeviceInfo) -> boo
     dev.vendor_id() == LEDGER_USB_VENDOR_ID && dev.usage_page() == 0 && dev.interface_number() == 0
 }
 
-fn find_ledger(hid_api: &HidApi) -> Option<&ledger_transport_hidapi::hidapi::DeviceInfo> {
+pub(crate) fn find_ledger(
+    hid_api: &HidApi,
+) -> Option<&ledger_transport_hidapi::hidapi::DeviceInfo> {
     hid_api
         .device_list()
         .find(|d| is_ledger_usage_page(d))

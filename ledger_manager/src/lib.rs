@@ -15,6 +15,7 @@ pub mod apps;
 pub mod device;
 pub mod error;
 pub mod firmware;
+mod hid;
 pub mod model;
 pub mod socket;
 pub mod version;
