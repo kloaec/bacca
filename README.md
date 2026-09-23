@@ -96,6 +96,51 @@ Querying Ledger's remote HSM to install the app. You might have to confirm the o
 Successfully installed the app.
 ```
 
+## BitBox
+
+Bacca can also update the firmware of BitBox02 devices without the BitBoxApp, using the
+`bitbox_manager` crate.
+
+On the BitBox there is no separate Bitcoin application: the firmware edition (Multi or
+Bitcoin-only) *is* the app, and is fixed by the device's bootloader. Updating the firmware is
+updating the "Bitcoin app". The edition of a device cannot be changed.
+
+Supported devices, in both firmware and bootloader mode:
+- BitBox02 Multi and BitBox02 Bitcoin-only
+- BitBox02 Nova Multi and BitBox02 Nova Bitcoin-only
+
+The BitBox01 is discontinued and not supported.
+
+The latest signed firmware for your device is downloaded from the [official GitHub
+releases](https://github.com/BitBoxSwiss/bitbox02-firmware/releases). Before flashing, the firmware
+file is validated (format, size, product/edition, no downgrade) and its hash is displayed so you
+can compare it with the hash published in the release notes and, if enabled, shown by the device
+at startup. The signatures are verified by the device's bootloader. Like the BitBoxApp, Bacca
+first installs and boots the required intermediate firmwares (v9.17.1, v9.26.2) when upgrading
+from an old firmware.
+
+Updating from firmware mode requires unlocking the device, confirming a pairing code the first
+time, and confirming the reboot into the bootloader on the device. The pairing is remembered in
+`bitbox.json` in the config directory (`~/.config/bacca` on Linux, override with
+`BITBOX_CONFIG_DIR`).
+
+### CLI
+
+The BitBox commands are passed through the `BITBOX_COMMAND` environment variable:
+- `getinfo`: show the product, edition, versions and state of your device
+- `checkfirm`: check the latest firmware release available for your device
+- `updatefirm`: update your device to the latest firmware release (also installs a firmware on a
+  device in bootloader mode without firmware)
+- `flashfile`: flash the signed firmware file at `BITBOX_FIRMWARE_FILE`
+- `hashfile`: show information and the hash of the signed firmware file at `BITBOX_FIRMWARE_FILE`
+
+Optional: set `BITBOX_SHOW_HASH=1` (or `0`) to make the device show (or not) the firmware hash on
+every boot, `BITBOX_FORCE` to reinstall the same firmware.
+
+```
+BITBOX_COMMAND=updatefirm cargo run -p ledger_manager_cli
+```
+
 ## Future
 
 We are looking into people to help test this and confirm it works in as many scenarii as possible.
