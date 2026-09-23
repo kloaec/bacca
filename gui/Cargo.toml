@@ -9,6 +9,7 @@ readme.workspace = true
 
 [dependencies]
 ledger_manager = { path = "../ledger_manager" }
+bitbox_manager = { path = "../bitbox_manager" }
 
 iced_runtime = "0.12.1"
 iced = { version = "0.12.1",default-features = false, features = ["webgl", "image"] }

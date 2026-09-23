@@ -7,8 +7,9 @@
 //! a time: while an operation is running the device is not polled.
 
 use crate::listener;
-use crate::{gui::Message, gui::Message::DeviceServiceMsg, ledger, service::ServiceFn};
+use crate::{bitbox, gui::Message, gui::Message::DeviceServiceMsg, ledger, service::ServiceFn};
 
+use bitbox_manager::{DeviceHandle, Edition};
 use ledger_manager::{ledger_transport_hidapi::hidapi::HidApi, FirmwareUpdateInfo};
 
 use std::fmt::{Display, Formatter};
@@ -19,7 +20,7 @@ listener!(DeviceListener, DeviceMessage, Message, DeviceServiceMsg);
 /// How often to look for a connected device.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-pub const CONNECT_HINT: &str = "Please connect your Ledger device and unlock it...";
+pub const CONNECT_HINT: &str = "Please connect your Ledger or BitBox device and unlock it...";
 
 #[derive(Debug, Clone, Default)]
 pub enum Version {
@@ -96,12 +97,29 @@ impl LedgerState {
     }
 }
 
+/// What the GUI displays about a connected BitBox.
+#[derive(Debug, Clone, Default)]
+pub struct BitboxState {
+    /// The platform: BitBox02 or BitBox02 Nova.
+    pub product: String,
+    pub edition: Option<Edition>,
+    /// The firmware version, or a description of the bootloader state. `None` if the device
+    /// could not be queried.
+    pub firmware: Option<String>,
+    /// Whether the device is in bootloader mode.
+    pub bootloader: bool,
+    /// Whether the device is set up, if known.
+    pub initialized: Option<bool>,
+    pub latest_firmware: LatestFirmware,
+}
+
 /// The device connected, as displayed by the GUI.
 #[derive(Debug, Clone, Default)]
 pub enum DeviceState {
     #[default]
     None,
     Ledger(Box<LedgerState>),
+    Bitbox(BitboxState),
 }
 
 /// A device found when enumerating the USB HID devices.
@@ -109,12 +127,16 @@ pub enum DeviceState {
 pub enum Detected {
     /// Identified by its HID path.
     Ledger(String),
+    Bitbox(DeviceHandle),
 }
 
 impl Detected {
     fn key(&self) -> String {
         match self {
             Detected::Ledger(path) => format!("ledger:{}", path),
+            // The mode is part of the key: the device information must be queried again when it
+            // switches between firmware and bootloader.
+            Detected::Bitbox(h) => format!("bitbox:{:?}:{}", h.mode, h.path.to_string_lossy()),
         }
     }
 }
@@ -228,6 +250,11 @@ fn probe(loaded: Option<String>) -> TaskResult {
     let found: Vec<Detected> = ledger_manager::list_ledger_devices(&api)
         .into_iter()
         .map(|d| Detected::Ledger(d.path))
+        .chain(
+            bitbox_manager::list_devices(&api)
+                .into_iter()
+                .map(Detected::Bitbox),
+        )
         .collect();
     if let Some(d) = found.iter().find(|d| Some(d.key()) == loaded) {
         return TaskResult::Probe {
@@ -251,6 +278,15 @@ fn load(device: Detected, reporter: &Reporter) -> TaskResult {
                 ok,
                 state: DeviceState::Ledger(Box::new(state)),
                 ledger_update: update.map(Box::new),
+            }
+        }
+        Detected::Bitbox(handle) => {
+            let (ok, state) = bitbox::load(&handle, reporter);
+            TaskResult::Loaded {
+                key,
+                ok,
+                state: DeviceState::Bitbox(state),
+                ledger_update: None,
             }
         }
     }
@@ -464,6 +500,18 @@ impl DeviceService {
     fn start_operation(&mut self, op: DeviceMessage) {
         let ledger = match &self.state {
             DeviceState::Ledger(l) if self.loaded.is_some() => l.clone(),
+            DeviceState::Bitbox(b) if self.loaded.is_some() => {
+                if matches!(op, DeviceMessage::UpdateFirmware)
+                    && matches!(b.latest_firmware, LatestFirmware::Available(_))
+                {
+                    self.set_busy(true);
+                    self.spawn_task(|r| bitbox::update(&r));
+                } else {
+                    // There are no apps to manage on the BitBox.
+                    self.drop_operation(&op);
+                }
+                return;
+            }
             _ => {
                 self.drop_operation(&op);
                 return;

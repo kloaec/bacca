@@ -1,11 +1,12 @@
 use crate::{
     device_service::{
-        DeviceListener, DeviceMessage, DeviceState, LatestFirmware, LedgerMode, LedgerState,
-        Version, CONNECT_HINT,
+        BitboxState, DeviceListener, DeviceMessage, DeviceState, LatestFirmware, LedgerMode,
+        LedgerState, Version, CONNECT_HINT,
     },
     theme::{self, Theme},
 };
 use async_channel::{Receiver, Sender};
+use bitbox_manager::Edition;
 use iced::{
     alignment, executor,
     widget::{Button, Column, Container, ProgressBar, Row, Rule, Space, Text},
@@ -187,6 +188,17 @@ impl Application for Bacca {
 impl Bacca {
     fn main_view(&self) -> Column<'_, Message, Theme> {
         let mut column = Column::new();
+        if let DeviceState::Bitbox(bitbox) = &self.device {
+            column = column
+                .push(section_title("Device"))
+                .push(Space::with_height(5))
+                .push(bitbox_device_container(bitbox, self.device_busy))
+                .push(Space::with_height(5))
+                .push(section_title("Bitcoin"))
+                .push(Space::with_height(5))
+                .push(bitbox_app_container(bitbox))
+                .push(Space::with_height(10));
+        }
         if let DeviceState::Ledger(ledger) = &self.device {
             column = column
                 .push(section_title("Device"))
@@ -270,6 +282,22 @@ impl Bacca {
             );
             lines.push(
                 "- Before proceeding, make sure you have the backup of your recovery phrase (24 words) at hand.".to_string(),
+            );
+        }
+        if let DeviceState::Bitbox(bitbox) = &self.device {
+            if let LatestFirmware::Available(v) = &bitbox.latest_firmware {
+                target = Some(v.clone());
+            }
+            if !bitbox.bootloader {
+                lines.push(
+                    "- You will have to unlock your BitBox, to confirm the pairing code (compare it with the one shown here) and to confirm the upgrade on the device.".to_string(),
+                );
+            }
+            lines.push(
+                "- Keep the device plugged in during the whole update. It can take a few minutes, the device may restart several times. The firmware hash will be shown here: compare it with the one shown by your BitBox.".to_string(),
+            );
+            lines.push(
+                "- Before proceeding, make sure you have the backup of your wallet (recovery words or microSD card) at hand.".to_string(),
             );
         }
         let title = match target {
@@ -383,6 +411,55 @@ fn ledger_device_container(
     )
     .style(theme::Container::Frame)
     .padding(10)
+}
+
+fn bitbox_device_container(
+    bitbox: &BitboxState,
+    device_busy: bool,
+) -> Container<'_, Message, Theme, Renderer> {
+    let edition = bitbox
+        .edition
+        .map(|e| e.to_string())
+        .unwrap_or(" - ".to_string());
+    let firmware = bitbox.firmware.clone().unwrap_or(" - ".to_string());
+    let update_msg = (!device_busy && bitbox.firmware.is_some()).then_some(Message::UpdateFirmware);
+
+    Container::new(
+        Column::new()
+            .spacing(5)
+            .push(info_row("Model:", Text::new(bitbox.product.clone())))
+            .push(info_row("Edition:", Text::new(edition)))
+            .push(info_row("Firmware:", Text::new(firmware)))
+            .push(info_row(
+                "Latest firmware:",
+                latest_firmware_value(&bitbox.latest_firmware, update_msg),
+            )),
+    )
+    .style(theme::Container::Frame)
+    .padding(10)
+}
+
+/// There is no Bitcoin app to install on the BitBox: the firmware edition is the app.
+fn bitbox_app_container(bitbox: &BitboxState) -> Container<'_, Message, Theme, Renderer> {
+    let mut column = Column::new().spacing(8).push(
+        Text::new(
+            "There is no separate Bitcoin app on the BitBox: the firmware edition is the app. Keep the firmware up to date.",
+        )
+        .width(Length::Fill),
+    );
+    if bitbox.edition == Some(Edition::Multi) {
+        column = column.push(
+            Text::new(
+                "This device runs the Multi edition. For Bitcoin, the Bitcoin-only edition is recommended (smaller attack surface). The edition of a device can't be changed.",
+            )
+            .style(theme::Text::Color(theme::color::GREY_2))
+            .width(Length::Fill),
+        );
+    }
+    Container::new(column)
+        .style(theme::Container::Frame)
+        .padding(15)
+        .width(Length::Fill)
 }
 
 fn apps_container<'a>(

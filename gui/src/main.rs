@@ -1,3 +1,4 @@
+mod bitbox;
 mod device_service;
 mod gui;
 mod ledger;
