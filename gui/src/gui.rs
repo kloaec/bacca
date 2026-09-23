@@ -1,34 +1,42 @@
 use crate::{
-    ledger_service::{LedgerListener, LedgerMessage, Version},
+    device_service::{
+        DeviceListener, DeviceMessage, DeviceState, LatestFirmware, LedgerMode, LedgerState,
+        Version, CONNECT_HINT,
+    },
     theme::{self, Theme},
 };
 use async_channel::{Receiver, Sender};
 use iced::{
     alignment, executor,
-    widget::{Button, Column, Container, Row, Rule, Space, Text},
+    widget::{Button, Column, Container, ProgressBar, Row, Rule, Space, Text},
     Alignment, Application, Element, Font, Length, Renderer,
 };
 use iced_runtime::{futures::Subscription, Command};
 
 const ICONEX_ICONS_BYTES: &[u8] = include_bytes!("iconex-icons.ttf");
 
+const FIRST_COLUMN_OFFSET: u16 = 60;
+const FIRST_COLUMN_WIDTH: u16 = 150;
+
 #[derive(Debug)]
 pub struct Flags {
-    pub ledger_sender: Sender<LedgerMessage>,
-    pub ledger_receiver: Receiver<LedgerMessage>,
+    pub device_sender: Sender<DeviceMessage>,
+    pub device_receiver: Receiver<DeviceMessage>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    LedgerServiceMsg(LedgerMessage),
+    DeviceServiceMsg(DeviceMessage),
 
     UpdateMain,
     InstallMain,
     UpdateTest,
     InstallTest,
-    #[allow(unused)]
-    Connect,
     GenuineCheck,
+    /// Ask confirmation for the firmware update.
+    UpdateFirmware,
+    ConfirmFirmwareUpdate,
+    CancelFirmwareUpdate,
 
     ResetAlarm,
     Result,
@@ -40,107 +48,85 @@ impl From<Result<(), iced::font::Error>> for Message {
     }
 }
 
-#[allow(unused)]
-pub struct LedgerInstaller {
-    ledger_sender: Sender<LedgerMessage>,
-    ledger_receiver: Receiver<LedgerMessage>,
-    ledger_model: Option<String>,
-    ledger_version: Option<String>,
-    main_app_version: Version,
-    main_latest_version: Version,
-    test_app_version: Version,
-    test_latest_version: Version,
+pub struct Bacca {
+    device_sender: Sender<DeviceMessage>,
+    device_receiver: Receiver<DeviceMessage>,
+    device: DeviceState,
     user_message: Option<String>,
-    device_is_genuine: Option<bool>,
+    /// Progress of the current step of the operation, between 0 and 1.
+    progress: Option<f32>,
+    /// Information to keep displayed during the operation.
+    info: Option<String>,
+    /// Whether the firmware update confirmation is displayed.
+    confirm_firmware_update: bool,
     device_busy: bool,
     alarm: bool,
 }
 
-impl LedgerInstaller {
-    #[allow(unused)]
-    pub fn send_ledger_msg(&self, msg: LedgerMessage) {
-        let sender = self.ledger_sender.clone();
+impl Bacca {
+    pub fn send_device_msg(&self, msg: DeviceMessage) {
+        let sender = self.device_sender.clone();
         tokio::spawn(async move { sender.send(msg).await });
+    }
+
+    /// Start an operation on the device.
+    fn operation(&mut self, msg: DeviceMessage) {
+        if !self.device_busy {
+            self.device_busy = true;
+            self.send_device_msg(msg);
+        }
     }
 }
 
-impl Application for LedgerInstaller {
+impl Application for Bacca {
     type Executor = executor::Default;
     type Message = Message;
     type Theme = Theme;
     type Flags = Flags;
 
     fn new(args: Self::Flags) -> (Self, Command<Self::Message>) {
-        let escrow = LedgerInstaller {
-            ledger_sender: args.ledger_sender,
-            ledger_receiver: args.ledger_receiver,
-            ledger_model: None,
-            ledger_version: None,
-            main_app_version: Version::None,
-            main_latest_version: Version::None,
-            test_app_version: Version::None,
-            test_latest_version: Version::None,
-            user_message: Some("Please connect a device and unlock it...".to_string()),
-            device_is_genuine: None,
+        let bacca = Bacca {
+            device_sender: args.device_sender,
+            device_receiver: args.device_receiver,
+            device: DeviceState::None,
+            user_message: Some(CONNECT_HINT.to_string()),
+            progress: None,
+            info: None,
+            confirm_firmware_update: false,
             device_busy: false,
             alarm: false,
         };
 
         let cmd = iced::font::load(ICONEX_ICONS_BYTES).map(Message::from);
-        (escrow, cmd)
+        (bacca, cmd)
     }
 
     fn title(&self) -> String {
-        "Bacca - your Ledger Bitcoin companion".to_string()
+        "Bacca - your hardware wallet Bitcoin companion".to_string()
     }
 
     fn update(&mut self, event: Message) -> Command<Message> {
         log::debug!("Gui receive: {:?}", event.clone());
         match event {
-            Message::LedgerServiceMsg(ledger) => match ledger {
-                LedgerMessage::Connected(model, version) => {
-                    self.device_busy = false;
-                    if model.is_none() {
-                        self.main_app_version = Version::None;
-                        self.main_latest_version = Version::None;
-                        self.test_app_version = Version::None;
-                        self.test_latest_version = Version::None;
+            Message::DeviceServiceMsg(msg) => match msg {
+                DeviceMessage::State(state) => {
+                    if matches!(state, DeviceState::None) {
+                        self.confirm_firmware_update = false;
                     }
-                    self.ledger_model = model;
-                    self.ledger_version = version;
+                    self.device = state;
                 }
-                LedgerMessage::MainAppVersion(version) => {
-                    self.device_busy = false;
-                    self.main_app_version = version;
-                }
-                LedgerMessage::TestAppVersion(version) => {
-                    self.device_busy = false;
-                    self.test_app_version = version;
-                }
-                LedgerMessage::DisplayMessage(s, alarm) => {
-                    log::info!(
-                        "LedgerInstaller::update(DisplayMessage({}), {:?})",
-                        s,
-                        alarm
-                    );
-                    if alarm {
-                        self.device_busy = false
-                    }
+                DeviceMessage::Status(s, alarm) => {
+                    log::info!("Bacca::update(Status({}), {:?})", s, alarm);
                     self.user_message = Some(s);
                     self.alarm = alarm;
                 }
-                LedgerMessage::DeviceIsGenuine(genuine) => {
-                    self.device_is_genuine = genuine;
-                    self.device_busy = false;
-                }
-                LedgerMessage::LatestApps(bitcoin, test) => {
-                    self.main_latest_version = bitcoin;
-                    self.test_latest_version = test;
-                }
-                _ => {
+                DeviceMessage::Progress(p) => self.progress = p,
+                DeviceMessage::Info(i) => self.info = i,
+                DeviceMessage::Busy(busy) => self.device_busy = busy,
+                msg => {
                     log::debug!(
-                        "LedgerInstaller.update() => Unhandled message from ledger: {:?}!",
-                        ledger
+                        "Bacca.update() => Unhandled message from device service: {:?}!",
+                        msg
                     )
                 }
             },
@@ -148,135 +134,39 @@ impl Application for LedgerInstaller {
                 self.alarm = false;
                 self.user_message = None;
             }
-            Message::UpdateMain => {
-                self.send_ledger_msg(LedgerMessage::UpdateMain);
-                self.device_busy = true;
+            Message::UpdateMain => self.operation(DeviceMessage::UpdateApp { testnet: false }),
+            Message::InstallMain => self.operation(DeviceMessage::InstallApp { testnet: false }),
+            Message::UpdateTest => self.operation(DeviceMessage::UpdateApp { testnet: true }),
+            Message::InstallTest => self.operation(DeviceMessage::InstallApp { testnet: true }),
+            Message::GenuineCheck => self.operation(DeviceMessage::GenuineCheck),
+            Message::UpdateFirmware => {
+                if !self.device_busy {
+                    self.confirm_firmware_update = true;
+                }
             }
-            Message::InstallMain => {
-                self.main_app_version = Version::None;
-                self.test_app_version = Version::None;
-                self.device_busy = true;
-                self.send_ledger_msg(LedgerMessage::InstallMain)
-            }
-            Message::UpdateTest => {
-                self.send_ledger_msg(LedgerMessage::UpdateTest);
-                self.device_busy = true;
-            }
-            Message::InstallTest => {
-                self.main_app_version = Version::None;
-                self.test_app_version = Version::None;
-                self.device_busy = true;
-                self.send_ledger_msg(LedgerMessage::InstallTest)
-            }
-            Message::GenuineCheck => {
-                self.device_busy = true;
-                self.send_ledger_msg(LedgerMessage::GenuineCheck)
+            Message::CancelFirmwareUpdate => self.confirm_firmware_update = false,
+            Message::ConfirmFirmwareUpdate => {
+                self.confirm_firmware_update = false;
+                self.operation(DeviceMessage::UpdateFirmware);
             }
             Message::Result => {}
-            _ => {
-                log::debug!("LedgerInstaller.update() => Unhandled message {:?}", event)
-            }
         }
         Command::none()
     }
 
     fn view(&self) -> Element<'_, Message, Theme> {
-        let display_app = self.ledger_model.is_some() && !self.alarm;
-
-        let device = device_container(
-            self.ledger_model.clone(),
-            self.ledger_version.clone(),
-            self.device_is_genuine,
-            self.device_busy,
-        );
-
-        let apps = apps_container(
-            self.main_app_version.clone(),
-            self.main_latest_version.clone(),
-            self.test_app_version.clone(),
-            self.test_latest_version.clone(),
-            self.device_busy,
-        );
-
-        let app = if display_app {
-            Some(
-                Column::new()
-                    .push(
-                        Row::new()
-                            .push(Space::with_width(Length::Fill))
-                            .push(Text::new("Device").size(20))
-                            .push(Space::with_width(Length::Fill)),
-                    )
-                    .push(Space::with_height(5))
-                    .push(device)
-                    .push(Space::with_height(5))
-                    .push(
-                        Row::new()
-                            .push(Space::with_width(Length::Fill))
-                            .push(Text::new("Apps").size(20))
-                            .push(Space::with_width(Length::Fill)),
-                    )
-                    .push(Space::with_height(5))
-                    .push(apps),
-            )
+        let content = if self.confirm_firmware_update {
+            self.confirmation_view()
+        } else if self.alarm {
+            self.alarm_view()
         } else {
-            None
-        };
-
-        let reset_alarm: Option<Row<Message, Theme, Renderer>> =
-            if self.alarm && self.ledger_model.is_some() {
-                Some(
-                    Row::new()
-                        .push(Space::with_width(Length::Fill))
-                        .push({
-                            let mut reset = Button::new(" OK ");
-                            reset = reset.on_press(Message::ResetAlarm);
-                            reset
-                        })
-                        .push(Space::with_width(Length::Fill)),
-                )
-            } else {
-                None
-            };
-
-        let hint_message =
-            if self.alarm && (self.ledger_model.is_some() || self.main_latest_version.is_none()) {
-                self.user_message.clone().map(|msg| {
-                    Row::new()
-                        .push(Space::with_width(Length::Fill))
-                        .push(Text::new(msg.clone()))
-                        .push(Space::with_width(Length::Fill))
-                })
-            } else if self.alarm && self.ledger_model.is_none() {
-                self.user_message.clone().map(|_| {
-                    Row::new()
-                        .push(Space::with_width(Length::Fill))
-                        .push(Text::new("Please connect a device and unlock it..."))
-                        .push(Space::with_width(Length::Fill))
-                })
-            } else {
-                None
-            };
-
-        let user_message = if !self.alarm {
-            self.user_message.clone().map(|msg| {
-                Row::new()
-                    .push(Space::with_width(10))
-                    .push(Text::new(msg.clone()))
-            })
-        } else {
-            None
+            self.main_view()
         };
 
         Container::new(
             Column::new()
                 .push(Space::with_height(Length::Fill))
-                .push_maybe(hint_message)
-                .push_maybe(app)
-                .push_maybe(reset_alarm)
-                .push(Space::with_height(10))
-                .push_maybe(user_message)
-                .push(Space::with_height(5))
+                .push(content)
                 .push(Space::with_height(Length::Fill)),
         )
         .padding(10)
@@ -288,76 +178,208 @@ impl Application for LedgerInstaller {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        Subscription::from_recipe(LedgerListener {
-            receiver: self.ledger_receiver.clone(),
+        Subscription::from_recipe(DeviceListener {
+            receiver: self.device_receiver.clone(),
         })
     }
 }
 
-fn device_container<'a>(
-    model: Option<String>,
-    version: Option<String>,
-    is_genuine: Option<bool>,
-    device_busy: bool,
-) -> Container<'a, Message, Theme, Renderer> {
-    let model = model.unwrap_or(" - ".to_string());
-    let version = version.unwrap_or(" - ".to_string());
+impl Bacca {
+    fn main_view(&self) -> Column<'_, Message, Theme> {
+        let mut column = Column::new();
+        if let DeviceState::Ledger(ledger) = &self.device {
+            column = column
+                .push(section_title("Device"))
+                .push(Space::with_height(5))
+                .push(ledger_device_container(ledger, self.device_busy))
+                .push(Space::with_height(5))
+                .push(section_title("Apps"))
+                .push(Space::with_height(5))
+                .push(apps_container(
+                    ledger.mainnet.clone(),
+                    ledger.latest_mainnet.clone(),
+                    ledger.testnet.clone(),
+                    ledger.latest_testnet.clone(),
+                    self.device_busy || !ledger.is_ready(),
+                ))
+                .push(Space::with_height(10));
+        }
 
-    // We do not allow user to click the button if service still processing a task w/ device
-    let genuine_msg = if !device_busy {
-        Some(Message::GenuineCheck)
-    } else {
-        None
-    };
+        let info = self.info.clone().map(|info| {
+            Container::new(
+                Text::new(info)
+                    .size(20)
+                    .width(Length::Fill)
+                    .horizontal_alignment(alignment::Horizontal::Center),
+            )
+            .style(theme::Container::Frame)
+            .padding(10)
+            .width(Length::Fill)
+        });
+        let user_message = self
+            .user_message
+            .clone()
+            .filter(|m| !m.is_empty())
+            .map(|msg| {
+                Row::new()
+                    .push(Space::with_width(10))
+                    .push(Text::new(msg).width(Length::Fill))
+            });
+        let progress = self
+            .progress
+            .map(|p| ProgressBar::new(0.0..=1.0, p).height(8));
+
+        column
+            .push_maybe(user_message)
+            .push(Space::with_height(5))
+            .push_maybe(info)
+            .push(Space::with_height(5))
+            .push_maybe(progress)
+    }
+
+    fn alarm_view(&self) -> Column<'_, Message, Theme> {
+        Column::new()
+            .push_maybe(self.user_message.clone().map(|msg| {
+                centered(Text::new(msg).horizontal_alignment(alignment::Horizontal::Center))
+            }))
+            .push(Space::with_height(10))
+            .push(centered(Button::new(" OK ").on_press(Message::ResetAlarm)))
+    }
+
+    fn confirmation_view(&self) -> Column<'_, Message, Theme> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut target = None;
+        if let DeviceState::Ledger(ledger) = &self.device {
+            if let LatestFirmware::Available(v) = &ledger.latest_firmware {
+                target = Some(v.clone());
+            }
+            lines.push(
+                "- All the apps installed on your Ledger will be uninstalled. You will have to reinstall the Bitcoin app afterwards (your funds are not affected).".to_string(),
+            );
+            if ledger.update_resets_customization {
+                lines.push(
+                    "- The language and the custom lock screen of your device may be reset."
+                        .to_string(),
+                );
+            }
+            lines.push(
+                "- Keep the device plugged in and unlocked during the whole update. It can take several minutes, the device may restart several times.".to_string(),
+            );
+            lines.push(
+                "- You will have to allow the Ledger manager and to confirm the update on the device, after checking the identifier it displays matches the one shown here.".to_string(),
+            );
+            lines.push(
+                "- Before proceeding, make sure you have the backup of your recovery phrase (24 words) at hand.".to_string(),
+            );
+        }
+        let title = match target {
+            Some(v) => format!("Update the firmware to {}?", v),
+            None => "Update the firmware?".to_string(),
+        };
+
+        let text = lines.into_iter().fold(Column::new().spacing(8), |col, l| {
+            col.push(Text::new(l).width(Length::Fill))
+        });
+
+        Column::new()
+            .push(section_title(&title))
+            .push(Space::with_height(10))
+            .push(
+                Container::new(text)
+                    .style(theme::Container::Frame)
+                    .padding(15)
+                    .width(Length::Fill),
+            )
+            .push(Space::with_height(15))
+            .push(
+                Row::new()
+                    .push(Space::with_width(Length::Fill))
+                    .push(Button::new(" Cancel ").on_press(Message::CancelFirmwareUpdate))
+                    .push(Space::with_width(30))
+                    .push(Button::new(" Update firmware ").on_press(Message::ConfirmFirmwareUpdate))
+                    .push(Space::with_width(Length::Fill)),
+            )
+    }
+}
+
+fn centered<'a>(
+    element: impl Into<Element<'a, Message, Theme>>,
+) -> Row<'a, Message, Theme, Renderer> {
+    Row::new()
+        .push(Space::with_width(Length::Fill))
+        .push(element)
+        .push(Space::with_width(Length::Fill))
+}
+
+fn section_title<'a>(title: &str) -> Row<'a, Message, Theme, Renderer> {
+    centered(Text::new(title.to_string()).size(20))
+}
+
+/// A row of the device information.
+fn info_row<'a>(
+    label: &str,
+    value: impl Into<Element<'a, Message, Theme>>,
+) -> Row<'a, Message, Theme, Renderer> {
+    Row::new()
+        .push(Space::with_width(FIRST_COLUMN_OFFSET))
+        .push(Text::new(label.to_string()).width(FIRST_COLUMN_WIDTH))
+        .push(Space::with_width(Length::Fill))
+        .push(value)
+        .push(Space::with_width(Length::Fill))
+        .align_items(Alignment::Center)
+}
+
+/// The latest firmware, with a button to update to it if possible.
+fn latest_firmware_value<'a>(
+    latest: &LatestFirmware,
+    update_msg: Option<Message>,
+) -> Row<'a, Message, Theme, Renderer> {
+    match latest {
+        LatestFirmware::Unknown => Row::new().push(Text::new(" - ")),
+        LatestFirmware::UpToDate => Row::new().push(Text::new("Up to date")),
+        LatestFirmware::Unsupported(v) => {
+            Row::new().push(Text::new(format!("{} (not supported)", v)))
+        }
+        LatestFirmware::Available(v) => Row::new()
+            .push(Text::new(v.clone()))
+            .push(Space::with_width(10))
+            .push(Button::new(" Update ").on_press_maybe(update_msg))
+            .align_items(Alignment::Center),
+    }
+}
+
+fn ledger_device_container(
+    ledger: &LedgerState,
+    device_busy: bool,
+) -> Container<'_, Message, Theme, Renderer> {
+    let model = ledger.model.clone().unwrap_or(" - ".to_string());
+    let version = ledger.firmware.clone().unwrap_or(" - ".to_string());
+
+    // We do not allow user to click the buttons if service still processing a task w/ device
+    let genuine_msg = (!device_busy && ledger.is_ready()).then_some(Message::GenuineCheck);
+    // An interrupted update can be resumed from the updater mode.
+    let can_update_firmware = ledger.firmware.is_some()
+        && matches!(ledger.mode, LedgerMode::Normal | LedgerMode::Updater);
+    let update_msg = (!device_busy && can_update_firmware).then_some(Message::UpdateFirmware);
 
     // allow user to check if device is genuine only once per launch
-    let button = if is_genuine.is_none() {
-        Some(Button::new("Check").on_press_maybe(genuine_msg))
-    } else {
-        None
+    let genuine: Element<'_, Message, Theme> = match ledger.genuine {
+        None => Button::new("Check").on_press_maybe(genuine_msg).into(),
+        Some(true) => Text::new(" Yes ").into(),
+        // FIXME: should we display in a more obvious way?
+        Some(false) => Text::new("No!").into(),
     };
-
-    let genuine = is_genuine.map(|g| {
-        if g {
-            Text::new(" Yes ")
-        } else {
-            // FIXME: should we display in a more obvious way?
-            Text::new("No!")
-        }
-    });
-
-    let first_column_offset = 80;
-    let first_column_width = 150;
 
     Container::new(
         Column::new()
-            .push(
-                Row::new()
-                    .push(Space::with_width(first_column_offset))
-                    .push(Text::new("Model:").width(first_column_width))
-                    .push(Space::with_width(Length::Fill))
-                    .push(Text::new(model))
-                    .push(Space::with_width(Length::Fill)),
-            )
-            .push(Space::with_height(5))
-            .push(
-                Row::new()
-                    .push(Space::with_width(first_column_offset))
-                    .push(Text::new("Firmware:").width(first_column_width))
-                    .push(Space::with_width(Length::Fill))
-                    .push(Text::new(version))
-                    .push(Space::with_width(Length::Fill)),
-            )
-            .push(Space::with_height(5))
-            .push(
-                Row::new()
-                    .push(Space::with_width(first_column_offset))
-                    .push(Text::new("Genuine:").width(first_column_width))
-                    .push(Space::with_width(Length::Fill))
-                    .push_maybe(button)
-                    .push_maybe(genuine)
-                    .push(Space::with_width(Length::Fill)),
-            ),
+            .spacing(5)
+            .push(info_row("Model:", Text::new(model)))
+            .push(info_row("Firmware:", Text::new(version)))
+            .push(info_row(
+                "Latest firmware:",
+                latest_firmware_value(&ledger.latest_firmware, update_msg),
+            ))
+            .push(info_row("Genuine:", genuine)),
     )
     .style(theme::Container::Frame)
     .padding(10)
@@ -422,39 +444,20 @@ fn apps_container<'a>(
     }
 
     // We do not allow user to click buttons if service still processing a task w/ device
-    let install_bitcoin_msg = if !device_busy {
-        Some(Message::InstallMain)
-    } else {
-        None
-    };
-    let update_bitcoin_msg = if !device_busy {
-        Some(Message::UpdateMain)
-    } else {
-        None
-    };
-    let install_test_msg = if !device_busy {
-        Some(Message::InstallTest)
-    } else {
-        None
-    };
-    let update_test_msg = if !device_busy {
-        Some(Message::UpdateTest)
-    } else {
-        None
-    };
+    let enabled = |msg: Message| (!device_busy).then_some(msg);
 
     let bitcoin_button = btn(
         &bitcoin_version,
         &bitcoin_latest,
-        install_bitcoin_msg,
-        update_bitcoin_msg,
+        enabled(Message::InstallMain),
+        enabled(Message::UpdateMain),
     );
 
     let test_button = btn(
         &test_version,
         &test_latest,
-        install_test_msg,
-        update_test_msg,
+        enabled(Message::InstallTest),
+        enabled(Message::UpdateTest),
     );
 
     let bitcoin_version = version(bitcoin_version);
