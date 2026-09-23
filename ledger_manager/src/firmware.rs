@@ -1,0 +1,657 @@
+//! Updating the firmware (OS) of the device.
+//!
+//! This follows the flow of Ledger Live Desktop:
+//! - the "prepare" step installs the OS Updater (OSU) on the device through the HSM. The user has
+//!   to allow the Ledger manager and to confirm the update (checking its identifier) on the
+//!   device. The device then reboots in updater mode.
+//!   https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/firmwareUpdate-prepare.ts
+//!   https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/installOsuFirmware.ts
+//! - the "main" step, where depending on the update the MCU and/or the bootloader are flashed
+//!   (device in bootloader mode), and for some legacy firmwares the final firmware is installed
+//!   separately. For most updates (and all updates of recent devices), the device installs the
+//!   final firmware itself after the OSU was installed and we only have to wait for it to reboot.
+//!   https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/firmwareUpdate-main.ts
+//!   https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/flash.ts
+//!   https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/installFinalFirmware.ts
+//! - finally we wait for the device to come back running the new firmware.
+//!   https://github.com/LedgerHQ/ledger-live/blob/develop/apps/ledger-live-desktop/src/renderer/modals/UpdateFirmwareModal/steps/02-step-updating.tsx
+//!
+//! The flashing loop also takes from the (mobile) device SDK implementation:
+//! https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/deviceSDK/tasks/updateFirmware.ts
+
+use crate::{
+    api::{
+        fetch_mcus, find_best_mcu, get_current_osu, get_device_version, get_final_firmware_by_id,
+        mcus_for_final_firmware, FinalFirmware, FirmwareUpdateInfo, McuVersion,
+    },
+    device::{connect, list_ledger_devices, quit_app, wait_for_device, DeviceInfo},
+    error::{Error, SocketContext},
+    socket::{run_device_socket, socket_url, SocketEvent},
+    version::{coerced_at_least, SemVer},
+};
+
+use ledger_transport_hidapi::hidapi::HidApi;
+
+use std::{thread, time::Duration, time::Instant};
+
+/// Bootloader versions aliases. https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/flash.ts
+const BL_VERSION_ALIASES: &[(&str, &str)] = &[("0.0", "0.6")];
+
+/// Maximum number of MCU or bootloader flashes before giving up.
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/deviceSDK/tasks/updateFirmware.ts
+const MAX_FLASH_REPETITIONS: usize = 5;
+
+/// A step of the firmware update, reported to the caller for progress display.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FirmwareUpdateStep {
+    /// Checking the state of the device.
+    Preparing,
+    /// The user must allow the Ledger manager on the device.
+    AllowManagerRequested,
+    /// The user allowed the Ledger manager.
+    AllowManagerGranted,
+    /// Transferring the OS updater to the device. `progress` is between 0 and 1.
+    InstallingOsu { progress: f32 },
+    /// The user must confirm the firmware update on the device. If present, the user should check
+    /// the identifier displayed on the device matches `identifier`.
+    WaitingUserConfirmation { identifier: Option<String> },
+    /// The user confirmed the update on the device.
+    UserConfirmed,
+    /// The device is rebooting.
+    WaitingForReboot,
+    /// Waiting for the device to reboot in bootloader mode, to flash the MCU.
+    WaitingForBootloader,
+    /// Flashing the bootloader. `progress` is between 0 and 1.
+    FlashingBootloader { progress: f32 },
+    /// Flashing the MCU. `progress` is between 0 and 1.
+    FlashingMcu { progress: f32 },
+    /// Installing the final firmware (legacy flow). `progress` is between 0 and 1.
+    InstallingFinal { progress: f32 },
+    /// Waiting for the device to finish the update and to reboot on the new firmware. The update
+    /// can take several minutes, the device must stay connected.
+    WaitingForDevice,
+    /// The device is locked. The user must unlock it for the update to complete.
+    DeviceLocked,
+    /// The update completed. Contains the new device information.
+    Done { device_info: Box<DeviceInfo> },
+}
+
+/// Options for the firmware update.
+#[derive(Debug, Clone)]
+pub struct FirmwareUpdateOptions {
+    /// How long to wait for the device to come back each time it reboots.
+    pub reboot_timeout: Duration,
+    /// How often to poll the device while waiting for it.
+    pub poll_interval: Duration,
+    /// How long to wait for the device to disconnect after the OSU was installed, when no MCU
+    /// needs to be flashed (Ledger Live's `potentialAutoFlash` step).
+    pub disconnect_timeout: Duration,
+}
+
+impl Default for FirmwareUpdateOptions {
+    fn default() -> Self {
+        Self {
+            // Ledger Live waits forever for the bootloader, and 5 minutes for the final reboot.
+            reboot_timeout: Duration::from_secs(10 * 60),
+            // WITH_DEVICE_POLLING_DELAY
+            poll_interval: Duration::from_millis(500),
+            disconnect_timeout: Duration::from_secs(20),
+        }
+    }
+}
+
+/// Check whether updating the firmware of this device is supported. Returns an error describing
+/// why if not.
+///
+/// See `isUsbUpdateSupported` in https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/isFirmwareUpdateVersionSupported.ts
+/// and `firmwareUnsupported`, `firmwareUpdateNeedsLegacyBlueResetInstructions` in
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/index.ts
+pub fn check_firmware_update_supported(device_info: &DeviceInfo) -> Result<(), Error> {
+    if device_info.is_bootloader {
+        return Err(Error::DeviceOnDashboardExpected);
+    }
+    if device_info.is_osu {
+        // An interrupted update can always be resumed.
+        return Ok(());
+    }
+    let model = device_info.model.ok_or_else(|| {
+        Error::FirmwareUpdateNotSupported(format!(
+            "unknown device model (target id {:#010x})",
+            device_info.target_id
+        ))
+    })?;
+    let min = model
+        .usb_update_min_version()
+        .ok_or_else(|| Error::FirmwareUpdateNotSupported(format!("{} is not supported", model)))?;
+    if !coerced_at_least(&device_info.version, min) {
+        return Err(Error::FirmwareUpdateNotSupported(format!(
+            "{} firmware {} is too old to be updated through USB (minimum {}.{}.{}). Please use Ledger Live.",
+            model, device_info.version, min.0, min.1, min.2
+        )));
+    }
+    Ok(())
+}
+
+/// Whether the firmware update will uninstall the applications installed on the device. Ledger
+/// Live considers it always does (`firmwareUpdateWillUninstallApps`), the apps have to be
+/// reinstalled afterwards.
+pub fn firmware_update_will_uninstall_apps(_device_info: &DeviceInfo) -> bool {
+    true
+}
+
+/// Whether the device will lose its custom lock screen and language settings during the update.
+/// Ledger Live backs them up and restores them for these devices; we don't.
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/apps/ledger-live-desktop/src/renderer/modals/UpdateFirmwareModal/helpers/createFirmwareUpdateSteps.ts
+pub fn firmware_update_resets_customization(
+    device_info: &DeviceInfo,
+    update: &FirmwareUpdateInfo,
+) -> bool {
+    device_info
+        .model
+        .map(|m| {
+            m.has_touch_screen()
+                || crate::device::is_device_localization_supported(update.version(), Some(m))
+        })
+        .unwrap_or(false)
+}
+
+/// The MCU or bootloader to flash, as determined from the current bootloader version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlashTarget {
+    /// The version to pass to the `/mcu` endpoint.
+    pub version: String,
+    /// Whether this is the MCU (or else the bootloader).
+    pub is_mcu: bool,
+}
+
+/// Determine what to flash given the bootloader version (`maj_min`) of the device.
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/flash.ts
+/// and `getFlashMcuOrBootloaderDetails` in
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/deviceSDK/tasks/updateFirmware.ts
+pub(crate) fn flash_target(
+    maj_min: &str,
+    mcus: &[McuVersion],
+    final_firmware: &FinalFirmware,
+    provider: u32,
+) -> Result<FlashTarget, Error> {
+    if let Some((_, alias)) = BL_VERSION_ALIASES.iter().find(|(v, _)| *v == maj_min) {
+        return Ok(FlashTarget {
+            version: alias.to_string(),
+            is_mcu: false,
+        });
+    }
+    let available = mcus_for_final_firmware(mcus, final_firmware, provider);
+    let mcu = find_best_mcu(&available).ok_or(Error::McuVersionNotFound)?;
+    // Converts the version into the majMin format.
+    let mcu_from_bootloader = mcu
+        .from_bootloader_version
+        .split('.')
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(".");
+    let is_mcu = maj_min == mcu_from_bootloader;
+    Ok(FlashTarget {
+        version: if is_mcu {
+            mcu.name.clone()
+        } else {
+            mcu_from_bootloader
+        },
+        is_mcu,
+    })
+}
+
+/// Map the bulk progress of the OSU installation to update steps. The penultimate APDU of the
+/// bulk is a blocking APDU which requires the user to confirm the update, and the last one means
+/// the user validated it.
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/deviceSDK/commands/firmwareUpdate/installFirmware.ts
+pub(crate) fn osu_step(
+    index: usize,
+    total: usize,
+    identifier: &Option<String>,
+) -> FirmwareUpdateStep {
+    if total > 0 && index + 1 == total {
+        FirmwareUpdateStep::WaitingUserConfirmation {
+            identifier: identifier.clone(),
+        }
+    } else if index == total {
+        FirmwareUpdateStep::UserConfirmed
+    } else {
+        FirmwareUpdateStep::InstallingOsu {
+            progress: index as f32 / total as f32,
+        }
+    }
+}
+
+fn install_firmware_socket<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    target_id: u32,
+    firmware: &str,
+    perso: &str,
+    firmware_key: &str,
+    mut on_bulk: impl FnMut(usize, usize) -> FirmwareUpdateStep,
+    progress: &mut P,
+) -> Result<(), Error> {
+    let transport = connect(hid_api)?;
+    let target_id = target_id.to_string();
+    let url = socket_url(
+        "install",
+        &[
+            ("targetId", &target_id),
+            ("firmware", firmware),
+            ("perso", perso),
+            ("firmwareKey", firmware_key),
+        ],
+    );
+    run_device_socket(&transport, &url, SocketContext::Firmware, |e| match e {
+        SocketEvent::DevicePermissionRequested => {
+            progress(FirmwareUpdateStep::AllowManagerRequested)
+        }
+        SocketEvent::DevicePermissionGranted => progress(FirmwareUpdateStep::AllowManagerGranted),
+        SocketEvent::BulkProgress { index, total } => progress(on_bulk(index, total)),
+        _ => {}
+    })?;
+    Ok(())
+}
+
+/// Wait for the device to disconnect, up to `timeout`.
+fn wait_for_disconnect(hid_api: &mut HidApi, timeout: Duration, interval: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if hid_api.refresh_devices().is_ok() && list_ledger_devices(hid_api).is_empty() {
+            log::debug!("Device disconnected.");
+            return;
+        }
+        thread::sleep(interval);
+    }
+    log::debug!("Device didn't disconnect after {:?}.", timeout);
+}
+
+/// Flash the MCU or the bootloader of a device in bootloader mode, retrying to connect to the
+/// device if it can't be opened (it may be rebooting).
+fn flash_mcu_or_bootloader<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    device_info: &DeviceInfo,
+    update: &FirmwareUpdateInfo,
+    mcus: &mut Option<Vec<McuVersion>>,
+    options: &FirmwareUpdateOptions,
+    progress: &mut P,
+) -> Result<(), Error> {
+    let target = if BL_VERSION_ALIASES
+        .iter()
+        .any(|(v, _)| *v == device_info.maj_min)
+    {
+        flash_target(&device_info.maj_min, &[], &update.final_firmware, 1)?
+    } else {
+        if mcus.is_none() {
+            *mcus = Some(fetch_mcus()?);
+        }
+        flash_target(
+            &device_info.maj_min,
+            mcus.as_deref().unwrap_or_default(),
+            &update.final_firmware,
+            device_info.provider_id(),
+        )?
+    };
+    log::info!(
+        "Flashing {} {} (bootloader version {}).",
+        if target.is_mcu { "MCU" } else { "bootloader" },
+        target.version,
+        device_info.maj_min
+    );
+    let step = |p: f32| {
+        if target.is_mcu {
+            FirmwareUpdateStep::FlashingMcu { progress: p }
+        } else {
+            FirmwareUpdateStep::FlashingBootloader { progress: p }
+        }
+    };
+    progress(step(0.0));
+
+    let start = Instant::now();
+    let transport = loop {
+        match connect(hid_api) {
+            Ok(t) => break t,
+            Err(e) if start.elapsed() < options.reboot_timeout => {
+                log::debug!("Could not open the device, retrying: {}", e);
+                thread::sleep(options.poll_interval);
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let target_id = device_info.target_id.to_string();
+    let url = socket_url(
+        "mcu",
+        &[("targetId", &target_id), ("version", &target.version)],
+    );
+    run_device_socket(&transport, &url, SocketContext::Mcu, |e| {
+        if let Some(p) = e.bulk_progress() {
+            progress(step(p));
+        }
+    })?;
+    Ok(())
+}
+
+/// Install the final firmware on a device in OSU mode (legacy flow).
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/installFinalFirmware.ts
+fn install_final_firmware<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    device_info: &DeviceInfo,
+    progress: &mut P,
+) -> Result<(), Error> {
+    let provider = device_info.provider_id();
+    let device_version = get_device_version(device_info.target_id, provider)?;
+    let osu = get_current_osu(&device_info.version, device_version.id, provider)?;
+    let next = get_final_firmware_by_id(osu.next_se_firmware_final_version)?;
+    let (firmware, firmware_key) = match (&next.firmware, &next.firmware_key) {
+        (Some(f), Some(k)) if !f.is_empty() => (f.clone(), k.clone()),
+        _ => {
+            return Err(Error::FirmwareUpdateNotSupported(
+                "no final firmware to install".into(),
+            ))
+        }
+    };
+    log::info!("Installing final firmware {}.", next.name);
+    progress(FirmwareUpdateStep::InstallingFinal { progress: 0.0 });
+    install_firmware_socket(
+        hid_api,
+        device_info.target_id,
+        &firmware,
+        &next.perso,
+        &firmware_key,
+        |index, total| FirmwareUpdateStep::InstallingFinal {
+            progress: if total > 0 {
+                index as f32 / total as f32
+            } else {
+                1.0
+            },
+        },
+        progress,
+    )
+}
+
+/// Update the firmware of the connected device to the version given by `update` (as returned by
+/// `latest_firmware`), using the default options. Returns the information of the device running
+/// the new firmware.
+///
+/// Progress is reported through the `progress` callback. The device reboots (possibly several
+/// times) during the update, which is why this takes the `HidApi` to reconnect to it: it must
+/// not be used concurrently to talk to the device, and no other transport to the device should be
+/// open.
+///
+/// WARNING: the applications installed on the device are removed by the update, and they need to
+/// be reinstalled afterwards. On Stax, Flex and Nano Gen5, the custom lock screen is not backed
+/// up and restored (Ledger Live does), and the language may have to be set again on the device.
+pub fn update_firmware<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    update: &FirmwareUpdateInfo,
+    progress: P,
+) -> Result<DeviceInfo, Error> {
+    update_firmware_with_options(hid_api, update, &FirmwareUpdateOptions::default(), progress)
+}
+
+/// Same as `update_firmware` with custom options.
+pub fn update_firmware_with_options<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    update: &FirmwareUpdateInfo,
+    options: &FirmwareUpdateOptions,
+    mut progress: P,
+) -> Result<DeviceInfo, Error> {
+    progress(FirmwareUpdateStep::Preparing);
+    let device_info = {
+        let transport = connect(hid_api)?;
+        quit_app(&transport)?;
+        DeviceInfo::new(&transport)?
+    };
+    check_firmware_update_supported(&device_info)?;
+    log::info!(
+        "Updating firmware of {} ({}) to {}. OSU: {}, flash MCU: {}, final firmware: {}.",
+        device_info
+            .model
+            .map(|m| m.product_name())
+            .unwrap_or("unknown device"),
+        device_info.firmware_summary(),
+        update.version(),
+        update.osu.name,
+        update.should_flash_mcu,
+        update.has_final_firmware()
+    );
+
+    // Prepare step: install the OSU. If the device is already in OSU mode (for instance if a
+    // previous update was interrupted) we directly jump to the main step, as Ledger Live does.
+    if !device_info.is_osu {
+        let identifier = update.osu.hash.clone().filter(|h| !h.is_empty());
+        progress(FirmwareUpdateStep::InstallingOsu { progress: 0.0 });
+        install_firmware_socket(
+            hid_api,
+            device_info.target_id,
+            &update.osu.firmware,
+            &update.osu.perso,
+            &update.osu.firmware_key,
+            |index, total| osu_step(index, total, &identifier),
+            &mut progress,
+        )?;
+        // The device is likely rebooting now, we give it some time.
+        progress(FirmwareUpdateStep::WaitingForReboot);
+        thread::sleep(Duration::from_secs(3));
+    }
+
+    let mut locked_reported = false;
+    let mut on_poll_error = |e: &Error, progress: &mut P| {
+        if matches!(e, Error::DeviceLocked) && !locked_reported {
+            locked_reported = true;
+            progress(FirmwareUpdateStep::DeviceLocked);
+        }
+    };
+
+    // Main step.
+    if update.should_flash_mcu {
+        progress(FirmwareUpdateStep::WaitingForBootloader);
+        let mut info = wait_for_device(
+            hid_api,
+            options.reboot_timeout,
+            options.poll_interval,
+            |i| i.is_bootloader,
+            |e| on_poll_error(e, &mut progress),
+        )?;
+        let mut mcus = None;
+        let mut repetitions = 0;
+        while info.is_bootloader {
+            if repetitions >= MAX_FLASH_REPETITIONS {
+                return Err(Error::TooManyMcuOrBootloaderFlashes);
+            }
+            repetitions += 1;
+            flash_mcu_or_bootloader(hid_api, &info, update, &mut mcus, options, &mut progress)?;
+            progress(FirmwareUpdateStep::WaitingForReboot);
+            thread::sleep(Duration::from_secs(2));
+            info = wait_for_device(
+                hid_api,
+                options.reboot_timeout,
+                options.poll_interval,
+                |_| true,
+                |e| on_poll_error(e, &mut progress),
+            )?;
+        }
+    } else {
+        // The device may flash things by itself: wait for it to disconnect (or for a timeout).
+        let info = wait_for_device(
+            hid_api,
+            options.reboot_timeout,
+            options.poll_interval,
+            |_| true,
+            |e| on_poll_error(e, &mut progress),
+        )?;
+        if !info.is_osu {
+            wait_for_disconnect(hid_api, options.disconnect_timeout, options.poll_interval);
+        }
+    }
+
+    if update.has_final_firmware() {
+        let info = wait_for_device(
+            hid_api,
+            options.reboot_timeout,
+            options.poll_interval,
+            |_| true,
+            |e| on_poll_error(e, &mut progress),
+        )?;
+        if !info.is_osu {
+            return Err(Error::DeviceInOsuExpected);
+        }
+        install_final_firmware(hid_api, &info, &mut progress)?;
+    }
+
+    // Wait for the device to come back running the new firmware.
+    progress(FirmwareUpdateStep::WaitingForDevice);
+    let info = wait_for_device(
+        hid_api,
+        options.reboot_timeout,
+        options.poll_interval,
+        |i| i.is_normal_mode(),
+        |e| on_poll_error(e, &mut progress),
+    )?;
+    if SemVer::coerce(&info.version) != SemVer::coerce(update.version()) {
+        log::warn!(
+            "Device is running firmware {} after the update, expected {}.",
+            info.version,
+            update.version()
+        );
+    }
+    log::info!("Firmware update done: {}.", info.firmware_summary());
+    progress(FirmwareUpdateStep::Done {
+        device_info: Box::new(info.clone()),
+    });
+    Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mcu(id: i64, name: &str, from: &str) -> McuVersion {
+        McuVersion {
+            id,
+            mcu: None,
+            name: name.to_string(),
+            description: None,
+            providers: vec![1],
+            from_bootloader_version: from.to_string(),
+            device_versions: vec![],
+            se_firmware_final_versions: vec![],
+        }
+    }
+
+    fn final_fw(mcu_versions: Vec<i64>) -> FinalFirmware {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": "2.1.0",
+            "perso": "perso_11",
+            "mcu_versions": mcu_versions,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn flash_targets() {
+        let mcus = vec![mcu(10, "2.30", "1.16"), mcu(11, "2.12", "1.12")];
+        let fw = final_fw(vec![10, 11]);
+
+        // Bootloader matches the MCU requirements: flash the MCU.
+        assert_eq!(
+            flash_target("1.16", &mcus, &fw, 1).unwrap(),
+            FlashTarget {
+                version: "2.30".into(),
+                is_mcu: true
+            }
+        );
+        // Bootloader too old: flash the bootloader first.
+        assert_eq!(
+            flash_target("1.12", &mcus, &fw, 1).unwrap(),
+            FlashTarget {
+                version: "1.16".into(),
+                is_mcu: false
+            }
+        );
+        // Alias.
+        assert_eq!(
+            flash_target("0.0", &[], &fw, 1).unwrap(),
+            FlashTarget {
+                version: "0.6".into(),
+                is_mcu: false
+            }
+        );
+        // No compatible MCU.
+        assert!(matches!(
+            flash_target("1.16", &mcus, &final_fw(vec![]), 1),
+            Err(Error::McuVersionNotFound)
+        ));
+        assert!(matches!(
+            flash_target("1.16", &mcus, &fw, 4),
+            Err(Error::McuVersionNotFound)
+        ));
+        // Only the first three parts of from_bootloader_version are considered.
+        let mcus = vec![mcu(12, "3.1", "2.0.1.4")];
+        assert_eq!(
+            flash_target("2.0.1", &mcus, &final_fw(vec![12]), 1).unwrap(),
+            FlashTarget {
+                version: "3.1".into(),
+                is_mcu: true
+            }
+        );
+    }
+
+    #[test]
+    fn osu_steps() {
+        let id = Some("ABCD".to_string());
+        assert_eq!(
+            osu_step(0, 4, &id),
+            FirmwareUpdateStep::InstallingOsu { progress: 0.0 }
+        );
+        assert_eq!(
+            osu_step(2, 4, &id),
+            FirmwareUpdateStep::InstallingOsu { progress: 0.5 }
+        );
+        assert_eq!(
+            osu_step(3, 4, &id),
+            FirmwareUpdateStep::WaitingUserConfirmation {
+                identifier: id.clone()
+            }
+        );
+        assert_eq!(osu_step(4, 4, &id), FirmwareUpdateStep::UserConfirmed);
+    }
+
+    fn device(hex_data: &str) -> DeviceInfo {
+        DeviceInfo::from_get_version_response(&hex::decode(hex_data).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn update_supported() {
+        // Nano X 2.2.3.
+        let nano_x = device("3300000405322e322e3304ee00000004322e333004312e3136010101000100");
+        assert!(check_firmware_update_supported(&nano_x).is_ok());
+        // Nano S 1.5.5: too old for USB update.
+        let data = format!(
+            "31100004{:02x}{}04a600000004{}",
+            5,
+            hex::encode("1.5.5"),
+            hex::encode("1.12")
+        );
+        let nano_s = device(&data);
+        assert!(matches!(
+            check_firmware_update_supported(&nano_s),
+            Err(Error::FirmwareUpdateNotSupported(_))
+        ));
+        // Blue.
+        let data = format!(
+            "31000002{:02x}{}04a600000004{}",
+            5,
+            hex::encode("2.1.1"),
+            hex::encode("1.12")
+        );
+        assert!(check_firmware_update_supported(&device(&data)).is_err());
+        // Bootloader.
+        let bl = device("0501000304312e313604f4d8aa4305322e322e330433000004");
+        assert!(matches!(
+            check_firmware_update_supported(&bl),
+            Err(Error::DeviceOnDashboardExpected)
+        ));
+    }
+}

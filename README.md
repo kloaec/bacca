@@ -14,8 +14,8 @@ Your Ledger companion.
 
 **WARNING: this is alpha software. Only use for testing.**
 
-A minimalistic software to install and upgrade the Bitcoin application on Ledger Nano S, S plus and
-X.
+A minimalistic software to install and upgrade the Bitcoin application, and to update the firmware,
+of Ledger devices.
 
 ![](./bacca_software_screenshot.png)
 
@@ -49,10 +49,22 @@ This software can be used:
 2) Through a Command Line Interface
 3) Through a Rust library for other projects to integrate some of the functionalities
 
+### Supported devices
+
+- Ledger Nano S
+- Ledger Nano S Plus
+- Ledger Nano X
+- Ledger Stax
+- Ledger Flex
+- Ledger Nano Gen5
+
+Devices are only supported through USB. On Linux you need the [Ledger udev
+rules](https://github.com/LedgerHQ/udev-rules) to access the device as a regular user.
+
 ### GUI
 
-The recommended way to use this software is through the GUI. Simply connect your Ledger Nano S, S
-plus or X to the USB port and run:
+The recommended way to use this software is through the GUI. Simply connect your Ledger device to
+the USB port and run:
 ```
 cargo run -p ledger_manager_gui
 ```
@@ -67,11 +79,19 @@ using an environment variable, `LEDGER_COMMAND`. Another env var lets you switch
 instance to install the test app), simply set `LEDGER_TESTNET` to any value.
 
 For now those commands are implemented:
-- `getinfo`: get information (such as the list of installed apps) for your device
+- `getinfo`: get information (such as the device model, the firmware version and the list of
+  installed apps) for your device
 - `genuinecheck`: check your Ledger device is genuine
 - `installapp`: install the Bitcoin app on your device
 - `updateapp`: update the Bitcoin app on your device
 - `openapp`: open the Bitcoin app on your device
+- `checkfirm`: show the current firmware version of your device and whether an update is available
+- `updatefirm`: update the firmware of your device to the latest version
+
+Updating the firmware removes the applications installed on the device: reinstall the Bitcoin app
+with `installapp` afterwards. On Ledger Stax, Flex and Nano Gen5 the custom lock screen is not
+backed up (unlike with Ledger Live) and the language may have to be set again. Keep the device
+connected during the whole update, it may restart several times.
 
 ### Examples
 
@@ -83,6 +103,13 @@ LEDGER_COMMAND=genuinecheck cargo run -p ledger_manager_cli
 ```
 Querying Ledger's remote HSM to perform the genuine check. You might have to confirm the operation on your device.
 Success. Your Ledger is genuine.
+```
+
+#### Updating the firmware of your Ledger
+
+```
+LEDGER_COMMAND=checkfirm cargo run -p ledger_manager_cli
+LEDGER_COMMAND=updatefirm cargo run -p ledger_manager_cli
 ```
 
 #### Installing the Bitcoin Test app on your Ledger
@@ -144,8 +171,6 @@ BITBOX_COMMAND=updatefirm cargo run -p ledger_manager_cli
 ## Future
 
 We are looking into people to help test this and confirm it works in as many scenarii as possible.
-
-We are probably going to have to introduce an `upgradefirmware` command.
 
 Contributions welcome! If you are interested, get in touch on the [Liana
 Discord](https://discord.gg/QJUp67zSN4).

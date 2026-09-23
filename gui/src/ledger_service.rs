@@ -50,7 +50,7 @@ where
                 &format!("Error listing installed applications: {}.", e),
                 true,
             );
-            return Err(e);
+            return Err(e.into());
         }
     }
     Ok((model, mainnet, testnet))
