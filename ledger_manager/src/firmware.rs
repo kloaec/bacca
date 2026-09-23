@@ -21,8 +21,9 @@
 
 use crate::{
     api::{
-        fetch_mcus, find_best_mcu, get_current_osu, get_device_version, get_final_firmware_by_id,
-        mcus_for_final_firmware, FinalFirmware, FirmwareUpdateInfo, McuVersion,
+        fetch_mcus, find_best_mcu, get_current_firmware, get_current_osu, get_device_version,
+        get_final_firmware_by_id, mcus_for_final_firmware, FinalFirmware, FirmwareUpdateInfo,
+        McuVersion,
     },
     device::{connect, list_ledger_devices, quit_app, wait_for_device, DeviceInfo},
     error::{Error, SocketContext},
@@ -38,6 +39,15 @@ use std::{thread, time::Duration, time::Instant};
 
 /// Bootloader versions aliases. https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/flash.ts
 const BL_VERSION_ALIASES: &[(&str, &str)] = &[("0.0", "0.6")];
+
+/// The MCU or bootloader version the repair flashes for these bootloader versions (`majMin`).
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/firmwareUpdate-repair.ts
+const REPAIR_VERSIONS: &[(&str, &str)] = &[
+    ("0.0", "0.6"),
+    ("0.6", "1.5"),
+    ("0.7", "1.6"),
+    ("0.9", "1.7"),
+];
 
 /// Maximum number of MCU or bootloader flashes before giving up.
 /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/deviceSDK/tasks/updateFirmware.ts
@@ -117,7 +127,7 @@ impl Default for FirmwareUpdateOptions {
 /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/index.ts
 pub fn check_firmware_update_supported(device_info: &DeviceInfo) -> Result<(), Error> {
     if device_info.is_bootloader {
-        return Err(Error::DeviceOnDashboardExpected);
+        return Err(Error::DeviceInBootloader);
     }
     if device_info.is_osu {
         // An interrupted update can always be resumed.
@@ -617,6 +627,200 @@ pub fn update_firmware_with_options<P: FnMut(FirmwareUpdateStep)>(
     Ok(info)
 }
 
+/// The MCU or bootloader to flash to repair a device in bootloader mode running a recent
+/// firmware (whose SE version is known): the best MCU for its current final firmware, or the
+/// bootloader this MCU requires if the device runs another bootloader version.
+/// `mcu_bl_version` is the bootloader version of the device.
+///
+/// From the `seVersion && seTargetId` branch of
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/firmwareUpdate-repair.ts
+pub(crate) fn repair_target_for_final_firmware(
+    mcu_bl_version: Option<&str>,
+    mcus: &[McuVersion],
+    final_firmware: &FinalFirmware,
+    provider: u32,
+) -> Option<FlashTarget> {
+    let available = mcus_for_final_firmware(mcus, final_firmware, provider);
+    let mcu = find_best_mcu(&available)?;
+    // Ledger Live compares the coerced versions, as strings (so two unparsable versions are
+    // equal).
+    let coerce = |v: &str| SemVer::coerce(v).map(|v| (v.major, v.minor, v.patch));
+    let expected = coerce(&mcu.from_bootloader_version);
+    let current = mcu_bl_version.and_then(coerce);
+    Some(if expected == current {
+        FlashTarget {
+            version: mcu.name.clone(),
+            is_mcu: true,
+        }
+    } else {
+        FlashTarget {
+            version: mcu.from_bootloader_version.clone(),
+            is_mcu: false,
+        }
+    })
+}
+
+/// The MCU to flash to repair a device in bootloader mode whose SE version is unknown: the best
+/// MCU which can be installed from its bootloader version.
+///
+/// From `compatibleMCUForDeviceInfo` in
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/api.ts
+pub(crate) fn repair_target_compatible(
+    maj_min: &str,
+    version: &str,
+    mcus: &[McuVersion],
+    provider: u32,
+) -> Option<FlashTarget> {
+    let compatible: Vec<McuVersion> = mcus
+        .iter()
+        .filter(|m| {
+            (m.from_bootloader_version == maj_min || m.from_bootloader_version == version)
+                && m.providers.contains(&(provider as i64))
+        })
+        .cloned()
+        .collect();
+    find_best_mcu(&compatible).map(|m| FlashTarget {
+        version: m.name.clone(),
+        is_mcu: true,
+    })
+}
+
+/// The MCU or bootloader version to flash for these bootloader versions, if fixed.
+pub(crate) fn repair_fixed_target(maj_min: &str) -> Option<FlashTarget> {
+    REPAIR_VERSIONS
+        .iter()
+        .find(|(v, _)| *v == maj_min)
+        .map(|(_, target)| FlashTarget {
+            version: target.to_string(),
+            // 0.0 is aliased to the 0.6 bootloader (see `BL_VERSION_ALIASES`).
+            is_mcu: maj_min != "0.0",
+        })
+}
+
+/// Determine what to flash to repair this device in bootloader mode.
+fn repair_target(
+    device_info: &DeviceInfo,
+    mcus: &mut Option<Vec<McuVersion>>,
+) -> Result<FlashTarget, Error> {
+    if let Some(target) = repair_fixed_target(&device_info.maj_min) {
+        return Ok(target);
+    }
+    let provider = device_info.provider_id();
+    let target = match (&device_info.se_version, device_info.se_target_id) {
+        (Some(se_version), Some(se_target_id)) => {
+            log::debug!(
+                "Repair: SE version {} and SE target id {:#010x} found.",
+                se_version,
+                se_target_id
+            );
+            let device_version = get_device_version(se_target_id, provider)?;
+            let final_firmware = get_current_firmware(se_version, device_version.id, provider)?;
+            repair_target_for_final_firmware(
+                device_info.mcu_bl_version.as_deref(),
+                cached_mcus(mcus)?,
+                &final_firmware,
+                provider,
+            )
+        }
+        _ => repair_target_compatible(
+            &device_info.maj_min,
+            &device_info.version,
+            cached_mcus(mcus)?,
+            provider,
+        ),
+    };
+    target.ok_or(Error::McuVersionNotFound)
+}
+
+/// Repair the firmware of a device in bootloader mode, typically after a firmware update was
+/// interrupted while flashing the MCU or the bootloader (`Error::DeviceInBootloader`), using the
+/// default options. Returns the information of the device once it left the bootloader.
+///
+/// This first waits for the device to be connected in bootloader mode, then flashes the MCU or
+/// the bootloader as needed until the device leaves the bootloader. `forced_version` forces the
+/// first version to flash, as Ledger Live's repair choices do ("0.7" if the device shows "MCU
+/// outdated" or "MCU not genuine", "0.9" if it tells to follow the repair or update
+/// instructions). Progress is reported through the same steps as `update_firmware`
+/// (`WaitingForBootloader`, `FlashingMcu`, `FlashingBootloader`, `WaitingForReboot`, `Done`).
+///
+/// If the device isn't in bootloader mode, this waits for it to be (up to the reboot timeout).
+/// If it runs its firmware normally after the repair, it may still be necessary to update the
+/// firmware (see `latest_firmware`).
+///
+/// Ported from https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/firmwareUpdate-repair.ts
+pub fn repair_firmware<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    forced_version: Option<&str>,
+    progress: P,
+) -> Result<DeviceInfo, Error> {
+    repair_firmware_with_options(
+        hid_api,
+        forced_version,
+        &FirmwareUpdateOptions::default(),
+        progress,
+    )
+}
+
+/// Same as `repair_firmware` with custom options.
+pub fn repair_firmware_with_options<P: FnMut(FirmwareUpdateStep)>(
+    hid_api: &mut HidApi,
+    forced_version: Option<&str>,
+    options: &FirmwareUpdateOptions,
+    mut progress: P,
+) -> Result<DeviceInfo, Error> {
+    progress(FirmwareUpdateStep::WaitingForBootloader);
+    let mut info = wait_for_device(
+        hid_api,
+        options.reboot_timeout,
+        options.poll_interval,
+        |i| i.is_bootloader,
+        |_| {},
+    )?;
+    log::info!(
+        "Repairing the firmware of the device ({}).",
+        info.firmware_summary()
+    );
+
+    let mut forced_version = forced_version.filter(|v| !v.is_empty());
+    let mut mcus = None;
+    let mut repetitions = 0;
+    while info.is_bootloader {
+        if repetitions >= MAX_FLASH_REPETITIONS {
+            return Err(Error::TooManyMcuOrBootloaderFlashes);
+        }
+        repetitions += 1;
+        let target = match forced_version.take() {
+            // This is a special case where the user is in firmware 1.3.1 and the device shows
+            // "MCU not genuine". The user needs to go back to the dashboard to continue the
+            // update process.
+            Some("0.7") if info.maj_min == "0.6" || info.maj_min == "0.7" => {
+                return Err(Error::McuNotGenuineToDashboard)
+            }
+            Some(version) => FlashTarget {
+                version: version.to_string(),
+                is_mcu: true,
+            },
+            None => repair_target(&info, &mut mcus)?,
+        };
+        install_mcu(hid_api, &info, &target, options, &mut progress)?;
+        progress(FirmwareUpdateStep::WaitingForReboot);
+        thread::sleep(Duration::from_secs(2));
+        info = wait_for_device(
+            hid_api,
+            options.reboot_timeout,
+            options.poll_interval,
+            |_| true,
+            |_| {},
+        )?;
+    }
+
+    log::info!("Firmware repair done: {}.", info.firmware_summary());
+    progress(FirmwareUpdateStep::Done {
+        device_info: Box::new(info.clone()),
+    });
+    Ok(info)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,6 +895,82 @@ mod tests {
                 is_mcu: true
             }
         );
+    }
+
+    #[test]
+    fn repair_targets() {
+        // Fixed versions.
+        let t = |v: &str, is_mcu| {
+            Some(FlashTarget {
+                version: v.into(),
+                is_mcu,
+            })
+        };
+        assert_eq!(repair_fixed_target("0.0"), t("0.6", false));
+        assert_eq!(repair_fixed_target("0.6"), t("1.5", true));
+        assert_eq!(repair_fixed_target("0.7"), t("1.6", true));
+        assert_eq!(repair_fixed_target("0.9"), t("1.7", true));
+        assert_eq!(repair_fixed_target("1.16"), None);
+        assert_eq!(repair_fixed_target("0.8"), None);
+
+        // With a known final firmware.
+        let mcus = vec![
+            mcu(10, "2.30", "1.16"),
+            mcu(11, "2.12", "1.12"),
+            mcu(12, "2.40", "none"),
+        ];
+        let fw = final_fw(vec![10, 11, 12]);
+        // The bootloader matches the best MCU: flash the MCU.
+        assert_eq!(
+            repair_target_for_final_firmware(Some("1.16"), &mcus, &fw, 1),
+            t("2.30", true)
+        );
+        assert_eq!(
+            repair_target_for_final_firmware(Some("1.16.0"), &mcus, &fw, 1),
+            t("2.30", true)
+        );
+        // Otherwise flash the bootloader it requires.
+        assert_eq!(
+            repair_target_for_final_firmware(Some("1.12"), &mcus, &fw, 1),
+            t("1.16", false)
+        );
+        assert_eq!(
+            repair_target_for_final_firmware(None, &mcus, &fw, 1),
+            t("1.16", false)
+        );
+        // The bootloader version is not truncated.
+        let mcus4 = vec![mcu(13, "3.1", "2.0.1.4")];
+        assert_eq!(
+            repair_target_for_final_firmware(Some("1.0"), &mcus4, &final_fw(vec![13]), 1),
+            t("2.0.1.4", false)
+        );
+        // No MCU for this final firmware or provider.
+        assert_eq!(
+            repair_target_for_final_firmware(Some("1.16"), &mcus, &final_fw(vec![12]), 1),
+            None
+        );
+        assert_eq!(
+            repair_target_for_final_firmware(Some("1.16"), &mcus, &fw, 2),
+            None
+        );
+
+        // Without SE information: the MCUs compatible with the bootloader version.
+        let mcus = vec![
+            mcu(10, "2.30", "1.16"),
+            mcu(14, "2.31", "1.16"),
+            mcu(11, "2.12", "1.12"),
+            mcu(15, "1.9", "1.4.2"),
+        ];
+        assert_eq!(
+            repair_target_compatible("1.16", "1.16", &mcus, 1),
+            t("2.31", true)
+        );
+        assert_eq!(
+            repair_target_compatible("1.4", "1.4.2", &mcus, 1),
+            t("1.9", true)
+        );
+        assert_eq!(repair_target_compatible("1.16", "1.16", &mcus, 2), None);
+        assert_eq!(repair_target_compatible("1.20", "1.20", &mcus, 1), None);
     }
 
     #[test]
@@ -809,7 +1089,7 @@ mod tests {
         let bl = device("0501000304312e313604f4d8aa4305322e322e330433000004");
         assert!(matches!(
             check_firmware_update_supported(&bl),
-            Err(Error::DeviceOnDashboardExpected)
+            Err(Error::DeviceInBootloader)
         ));
     }
 }

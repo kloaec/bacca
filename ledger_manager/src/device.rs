@@ -580,6 +580,18 @@ impl DeviceInfo {
     pub fn is_normal_mode(&self) -> bool {
         !self.is_bootloader && !self.is_osu
     }
+
+    /// Return an error if the device doesn't run its OS normally: `Error::DeviceInBootloader`
+    /// in bootloader mode, `Error::DeviceOnDashboardExpected` in updater mode.
+    pub fn check_normal_mode(&self) -> Result<(), Error> {
+        if self.is_bootloader {
+            Err(Error::DeviceInBootloader)
+        } else if self.is_osu {
+            Err(Error::DeviceOnDashboardExpected)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// The name and version of the application currently running on the device ("BOLOS" when on

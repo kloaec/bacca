@@ -202,9 +202,7 @@ pub fn is_bitcoin_app_installed(
 pub fn get_latest_apps(
     device_info: &DeviceInfo,
 ) -> Result<(Option<BitcoinAppInfo>, Option<BitcoinAppInfo>), Error> {
-    if device_info.is_bootloader || device_info.is_osu {
-        return Err(Error::DeviceOnDashboardExpected);
-    }
+    device_info.check_normal_mode()?;
     let mut bitcoin = None;
     let mut test = None;
     for app in bitcoin_apps_catalog(device_info)? {
@@ -257,9 +255,7 @@ pub fn genuine_check_with_events<F: FnMut(SocketEvent)>(
     on_event: F,
 ) -> Result<(), Error> {
     let device_info = DeviceInfo::new(ledger_api)?;
-    if !device_info.is_normal_mode() {
-        return Err(Error::DeviceOnDashboardExpected);
-    }
+    device_info.check_normal_mode()?;
     let firmware_info = current_firmware(&device_info)?;
 
     let target_id = device_info.target_id.to_string();

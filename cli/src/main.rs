@@ -10,9 +10,9 @@ use ledger_manager::{
     check_firmware_update_supported, current_firmware, firmware_update_resets_customization,
     genuine_check_with_events, install_bitcoin_app_with_progress, latest_firmware,
     ledger_transport_hidapi::{hidapi::HidApi, TransportNativeHID},
-    list_installed_apps, open_bitcoin_app, open_device, update_bitcoin_app_with_progress,
-    update_firmware, AppInstallStep, DeviceInfo, DeviceModel, FirmwareUpdateStep, InstallErr,
-    SocketEvent, UpdateErr,
+    list_installed_apps, open_bitcoin_app, open_device, repair_firmware,
+    update_bitcoin_app_with_progress, update_firmware, AppInstallStep, DeviceInfo, DeviceModel,
+    FirmwareUpdateStep, InstallErr, SocketEvent, UpdateErr,
 };
 
 // Print on stderr and exit with 1.
@@ -35,6 +35,7 @@ enum Command {
     OpenTestApp,
     CheckFirmware,
     UpdateFirmware,
+    RepairFirmware,
 }
 
 impl Command {
@@ -69,6 +70,8 @@ impl Command {
             Some(Self::CheckFirmware)
         } else if cmd_str == "updatefirm" {
             Some(Self::UpdateFirmware)
+        } else if cmd_str == "repairfirm" {
+            Some(Self::RepairFirmware)
         } else {
             None
         }
@@ -208,7 +211,7 @@ fn check_firmware(ledger_api: &TransportNativeHID, usb_model: Option<DeviceModel
     let device_info = device_info(ledger_api);
     println!("Device model: {}", model_name(&device_info, usb_model));
     if device_info.is_bootloader {
-        error!("Device is in bootloader mode. Firmware information can't be queried.");
+        error!("Device is in bootloader mode, a firmware update was probably interrupted. Firmware information can't be queried. Use the repairfirm command to complete the update.");
     }
     if device_info.is_osu {
         println!(
@@ -279,7 +282,33 @@ fn update_firm(mut hid_api: HidApi) {
     println!("Keep your device connected and unlocked during the whole update. It can take several minutes.");
 
     let res = update_firmware(&mut hid_api, &update, |step| {
-        match step {
+        print_firmware_step(step, false)
+    });
+    match res {
+        Ok(_) => println!("Successfully updated the firmware. You can now reinstall the Bitcoin app with the installapp command."),
+        Err(e) => error!("\nError updating the firmware: {}", e),
+    }
+}
+
+fn repair_firm(mut hid_api: HidApi) {
+    let forced_version = env::var("LEDGER_REPAIR_VERSION").ok();
+    println!("Repairing the firmware of the device in bootloader mode. Keep your device connected during the whole repair.");
+    let res = repair_firmware(&mut hid_api, forced_version.as_deref(), |step| {
+        print_firmware_step(step, true)
+    });
+    match res {
+        Ok(info) if info.is_osu => println!(
+            "The device is now in updater mode. Use the updatefirm command to complete the firmware update."
+        ),
+        Ok(_) => println!(
+            "Successfully repaired the firmware. Use the checkfirm command to check whether a firmware update is available."
+        ),
+        Err(e) => error!("\nError repairing the firmware: {}", e),
+    }
+}
+
+fn print_firmware_step(step: FirmwareUpdateStep, is_repair: bool) {
+    match step {
         FirmwareUpdateStep::Preparing => println!("Preparing the update."),
         FirmwareUpdateStep::AllowManagerRequested => {
             println!("Please allow the Ledger manager on your device.")
@@ -300,6 +329,9 @@ fn update_firm(mut hid_api: HidApi) {
         }
         FirmwareUpdateStep::UserConfirmed => println!("Update confirmed on the device."),
         FirmwareUpdateStep::WaitingForReboot => println!("Waiting for the device to restart."),
+        FirmwareUpdateStep::WaitingForBootloader if is_repair => {
+            println!("Waiting for the device in bootloader mode.")
+        }
         FirmwareUpdateStep::WaitingForBootloader => {
             println!("Waiting for the device to restart in bootloader mode.")
         }
@@ -318,11 +350,6 @@ fn update_firm(mut hid_api: HidApi) {
             println!("Device now running {}.", device_info.firmware_summary())
         }
     }
-    });
-    match res {
-        Ok(_) => println!("Successfully updated the firmware. You can now reinstall the Bitcoin app with the installapp command."),
-        Err(e) => error!("\nError updating the firmware: {}", e),
-    }
 }
 
 fn main() {
@@ -333,13 +360,14 @@ fn main() {
     let command = if let Some(cmd) = Command::get() {
         cmd
     } else {
-        error!("Invalid or no command specified. The command must be passed through the LEDGER_COMMAND env var (getinfo, genuinecheck, installapp, updateapp, openapp, checkfirm, updatefirm). Set LEDGER_TESTNET to use the Bitcoin testnet app instead where applicable.");
+        error!("Invalid or no command specified. The command must be passed through the LEDGER_COMMAND env var (getinfo, genuinecheck, installapp, updateapp, openapp, checkfirm, updatefirm, repairfirm). Set LEDGER_TESTNET to use the Bitcoin testnet app instead where applicable.");
     };
 
     let hid_api = hid_api();
-    if let Command::UpdateFirmware = command {
-        update_firm(hid_api);
-        return;
+    match command {
+        Command::UpdateFirmware => return update_firm(hid_api),
+        Command::RepairFirmware => return repair_firm(hid_api),
+        _ => {}
     }
 
     let (ledger_api, usb_model) = ledger_api(&hid_api);
@@ -371,6 +399,6 @@ fn main() {
         Command::CheckFirmware => {
             check_firmware(&ledger_api, usb_model);
         }
-        Command::UpdateFirmware => unreachable!("Handled above."),
+        Command::UpdateFirmware | Command::RepairFirmware => unreachable!("Handled above."),
     }
 }

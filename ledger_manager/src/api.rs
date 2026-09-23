@@ -392,7 +392,7 @@ impl FirmwareUpdateInfo {
 /// Ported from https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/use-cases/getLatestFirmwareForDevice.ts
 pub fn latest_firmware(device_info: &DeviceInfo) -> Result<Option<FirmwareUpdateInfo>, Error> {
     if device_info.is_bootloader {
-        return Err(Error::DeviceOnDashboardExpected);
+        return Err(Error::DeviceInBootloader);
     }
     let provider = device_info.provider_id();
     let device_version = get_device_version(device_info.target_id, provider)?;
