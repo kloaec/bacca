@@ -40,8 +40,8 @@ pub use device::{
 pub use error::{Error, SocketContext, StatusCode};
 pub use firmware::{
     check_firmware_update_supported, firmware_update_resets_customization,
-    firmware_update_will_uninstall_apps, update_firmware, update_firmware_with_options,
-    FirmwareUpdateOptions, FirmwareUpdateStep,
+    firmware_update_will_uninstall_apps, format_hash_name, update_firmware,
+    update_firmware_with_options, FirmwareUpdateOptions, FirmwareUpdateStep,
 };
 pub use model::{DeviceModel, LEDGER_USB_VENDOR_ID};
 pub use socket::{query_via_websocket, run_device_socket, SocketEvent};

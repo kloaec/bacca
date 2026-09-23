@@ -26,6 +26,7 @@ use crate::{
     },
     device::{connect, list_ledger_devices, quit_app, wait_for_device, DeviceInfo},
     error::{Error, SocketContext},
+    model::DeviceModel,
     socket::{run_device_socket, socket_url, SocketEvent},
     version::{coerced_at_least, SemVer},
 };
@@ -53,7 +54,8 @@ pub enum FirmwareUpdateStep {
     /// Transferring the OS updater to the device. `progress` is between 0 and 1.
     InstallingOsu { progress: f32 },
     /// The user must confirm the firmware update on the device. If present, the user should check
-    /// the identifier displayed on the device matches `identifier`.
+    /// the identifier displayed on the device matches `identifier`. It is formatted like the
+    /// device displays it (see `format_hash_name`), with its lines separated by spaces.
     WaitingUserConfirmation { identifier: Option<String> },
     /// The user confirmed the update on the device.
     UserConfirmed,
@@ -198,6 +200,63 @@ pub(crate) fn flash_target(
         },
         is_mcu,
     })
+}
+
+/// Format the identifier (hash) of a firmware the way the device displays it, so the user can
+/// compare them. Returns the lines of the identifier: the hash is uppercased and, depending on the
+/// model and firmware version of the device, split into chunks (Nano X, Nano S 1.6.0 and later)
+/// or ellipsized (Blue and Nano S before 1.6.0, or when the model or version is unknown). Newer
+/// models display the full hash.
+///
+/// Ported from `formatHashName` in
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/index.ts
+pub fn format_hash_name(
+    hash: &str,
+    model: Option<DeviceModel>,
+    firmware_version: Option<&str>,
+) -> Vec<String> {
+    let version = firmware_version.and_then(SemVer::coerce);
+    // Ledger Live would throw for an invalid version, we show the full hash then.
+    let nano_s_lt_1_6 = version.as_ref().map(|v| *v < SemVer::new(1, 6, 0));
+    let (should_ellipsis, should_split) = match (model, firmware_version) {
+        (Some(model), Some(_)) => (
+            model == DeviceModel::Blue
+                || (model == DeviceModel::NanoS && nano_s_lt_1_6 == Some(true)),
+            (model == DeviceModel::NanoS && nano_s_lt_1_6 == Some(false))
+                || model == DeviceModel::NanoX,
+        ),
+        _ => (true, false),
+    };
+    let hash = hash.to_uppercase();
+    if should_split {
+        let split_length = if model == Some(DeviceModel::NanoS) {
+            16
+        } else {
+            17
+        };
+        hash.chars()
+            .collect::<Vec<_>>()
+            .chunks(split_length)
+            .map(|c| c.iter().collect())
+            .collect()
+    } else if hash.chars().count() > 8 && should_ellipsis {
+        let chars: Vec<char> = hash.chars().collect();
+        let start: String = chars[..4].iter().collect();
+        let end: String = chars[chars.len() - 4..].iter().collect();
+        vec![format!("{}...{}", start, end)]
+    } else {
+        vec![hash]
+    }
+}
+
+/// The OSU identifier to show to the user for comparison with the one the device displays, if
+/// the Ledger API gave one. The lines of `format_hash_name` are joined with spaces.
+pub(crate) fn osu_identifier(
+    update: &FirmwareUpdateInfo,
+    device_info: &DeviceInfo,
+) -> Option<String> {
+    let hash = update.osu.hash.as_deref().filter(|h| !h.is_empty())?;
+    Some(format_hash_name(hash, device_info.model, Some(&device_info.version)).join(" "))
 }
 
 /// Map the bulk progress of the OSU installation to update steps. The penultimate APDU of the
@@ -419,7 +478,7 @@ pub fn update_firmware_with_options<P: FnMut(FirmwareUpdateStep)>(
     // Prepare step: install the OSU. If the device is already in OSU mode (for instance if a
     // previous update was interrupted) we directly jump to the main step, as Ledger Live does.
     if !device_info.is_osu {
-        let identifier = update.osu.hash.clone().filter(|h| !h.is_empty());
+        let identifier = osu_identifier(update, &device_info);
         progress(FirmwareUpdateStep::InstallingOsu { progress: 0.0 });
         install_firmware_socket(
             hid_api,
@@ -595,6 +654,69 @@ mod tests {
                 version: "3.1".into(),
                 is_mcu: true
             }
+        );
+    }
+
+    #[test]
+    fn hash_names() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let upper = hash.to_uppercase();
+        // Nano X: chunks of 17.
+        assert_eq!(
+            format_hash_name(hash, Some(DeviceModel::NanoX), Some("2.2.3")),
+            vec![
+                "0123456789ABCDEF0",
+                "123456789ABCDEF01",
+                "23456789ABCDEF012",
+                "3456789ABCDEF",
+            ]
+        );
+        // Nano S 1.6.0 and later: chunks of 16.
+        assert_eq!(
+            format_hash_name(hash, Some(DeviceModel::NanoS), Some("2.1.0")),
+            vec!["0123456789ABCDEF"; 4]
+        );
+        assert_eq!(
+            format_hash_name(hash, Some(DeviceModel::NanoS), Some("1.6.0")),
+            vec!["0123456789ABCDEF"; 4]
+        );
+        // Older Nano S and Blue: ellipsis.
+        assert_eq!(
+            format_hash_name(hash, Some(DeviceModel::NanoS), Some("1.5.5")),
+            vec!["0123...CDEF"]
+        );
+        assert_eq!(
+            format_hash_name(hash, Some(DeviceModel::Blue), Some("2.1.1")),
+            vec!["0123...CDEF"]
+        );
+        assert_eq!(
+            format_hash_name("abcd1234", Some(DeviceModel::Blue), Some("2.1.1")),
+            vec!["ABCD1234"]
+        );
+        // Unknown model or version: ellipsis.
+        assert_eq!(
+            format_hash_name(hash, None, Some("1.0.0")),
+            vec!["0123...CDEF"]
+        );
+        assert_eq!(
+            format_hash_name(hash, Some(DeviceModel::Stax), None),
+            vec!["0123...CDEF"]
+        );
+        // Newer models: the full hash.
+        for m in [
+            DeviceModel::NanoSPlus,
+            DeviceModel::Stax,
+            DeviceModel::Flex,
+            DeviceModel::NanoGen5,
+        ] {
+            assert_eq!(
+                format_hash_name(hash, Some(m), Some("1.1.0")),
+                vec![upper.clone()]
+            );
+        }
+        assert_eq!(
+            format_hash_name("", Some(DeviceModel::NanoX), Some("2.2.3")),
+            Vec::<String>::new()
         );
     }
 
