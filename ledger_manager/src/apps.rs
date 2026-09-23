@@ -130,11 +130,9 @@ pub(crate) fn parse_list_apps_response(data: &[u8]) -> Result<Vec<InstalledApp>,
     Ok(apps)
 }
 
-/// Get a list of applications installed on this device.
-pub fn list_installed_apps_raw(
-    ledger_api: &TransportNativeHID,
-) -> Result<Vec<InstalledApp>, Error> {
-    let check = |answer: &ledger_apdu::APDUAnswer<Vec<u8>>| match answer.retcode() {
+/// Interpret the status code of a response to the ListApps APDU.
+pub(crate) fn check_list_apps_status(status: u16) -> Result<(), Error> {
+    match status {
         r if r == StatusCode::OK as u16 => Ok(()),
         r if r == StatusCode::LockedDevice as u16 => Err(Error::DeviceLocked),
         r if r == StatusCode::UserRefusedOnDevice as u16
@@ -142,8 +140,20 @@ pub fn list_installed_apps_raw(
         {
             Err(Error::UserRefusedAllowManager)
         }
+        // ListApps is handled by the dashboard, an application answers it with these.
+        r if r == StatusCode::InsNotSupported as u16 || r == StatusCode::ClaNotSupported as u16 => {
+            Err(Error::DeviceOnDashboardExpected)
+        }
         r => Err(Error::DeviceStatus(r)),
-    };
+    }
+}
+
+/// Get a list of applications installed on this device.
+pub fn list_installed_apps_raw(
+    ledger_api: &TransportNativeHID,
+) -> Result<Vec<InstalledApp>, Error> {
+    let check =
+        |answer: &ledger_apdu::APDUAnswer<Vec<u8>>| check_list_apps_status(answer.retcode());
 
     let mut answer = ledger_api.exchange(&LIST_APPS_COMMAND)?;
     check(&answer)?;
@@ -484,6 +494,21 @@ pub fn uninstall_app<P: FnMut(AppInstallStep)>(
     Ok(())
 }
 
+/// Quit the open application, if any, and get the information of the device, checking it runs
+/// its firmware normally.
+fn dashboard_device_info(ledger_api: &TransportNativeHID) -> Result<DeviceInfo, Error> {
+    if let Err(e) = quit_app(ledger_api) {
+        // Give a clearer error if this is because the device is in bootloader or updater mode.
+        if let Ok(info) = DeviceInfo::new(ledger_api) {
+            info.check_normal_mode()?;
+        }
+        return Err(e);
+    }
+    let device_info = DeviceInfo::new(ledger_api)?;
+    device_info.check_normal_mode()?;
+    Ok(device_info)
+}
+
 /// Install the Bitcoin application on this device. Set `is_testnet` to `true` to install the
 /// testnet app instead.
 pub fn install_bitcoin_app(
@@ -499,6 +524,9 @@ pub fn install_bitcoin_app_with_progress<P: FnMut(AppInstallStep)>(
     is_testnet: bool,
     mut progress: P,
 ) -> Result<(), InstallErr> {
+    // Go back to the dashboard if an app is open, the dashboard handles the commands below.
+    let device_info = dashboard_device_info(ledger_api).map_err(InstallErr::Any)?;
+
     // First of all make sure it's not already installed.
     progress(AppInstallStep::ListingApps);
     if is_bitcoin_app_installed(ledger_api, is_testnet).map_err(InstallErr::Any)? {
@@ -507,7 +535,6 @@ pub fn install_bitcoin_app_with_progress<P: FnMut(AppInstallStep)>(
 
     // Get the app info, necessary for the websocket query below.
     progress(AppInstallStep::QueryingApi);
-    let device_info = DeviceInfo::new(ledger_api).map_err(InstallErr::Any)?;
     let bitcoin_app = bitcoin_latest_app(&device_info, is_testnet)
         .map_err(InstallErr::Any)?
         .ok_or(InstallErr::AppNotFound)?;
@@ -556,6 +583,9 @@ pub fn update_bitcoin_app_with_progress<P: FnMut(AppInstallStep)>(
     is_testnet: bool,
     mut progress: P,
 ) -> Result<(), UpdateErr> {
+    // Go back to the dashboard if an app is open, the dashboard handles the commands below.
+    let device_info = dashboard_device_info(ledger_api).map_err(UpdateErr::Any)?;
+
     // First of all make sure the app is installed. Get its details.
     progress(AppInstallStep::ListingApps);
     let app = bitcoin_app_installed(ledger_api, is_testnet)
@@ -570,7 +600,6 @@ pub fn update_bitcoin_app_with_progress<P: FnMut(AppInstallStep)>(
         .flatten();
 
     // Get the latest app info, necessary for the websocket query below.
-    let device_info = DeviceInfo::new(ledger_api).map_err(UpdateErr::Any)?;
     let latest_app = bitcoin_latest_app(&device_info, is_testnet)
         .map_err(UpdateErr::Any)?
         .ok_or(UpdateErr::AppNotFound)?;
@@ -666,6 +695,31 @@ mod tests {
         assert!(is_app_update_available(None, "2.1.3", "aa", "bb"));
         assert!(!is_app_update_available(None, "2.1.3", "aa", "AA"));
         assert!(is_app_update_available(Some("weird"), "2.1.3", "aa", "bb"));
+    }
+
+    #[test]
+    fn list_apps_status() {
+        assert!(check_list_apps_status(0x9000).is_ok());
+        assert!(matches!(
+            check_list_apps_status(0x6d00),
+            Err(Error::DeviceOnDashboardExpected)
+        ));
+        assert!(matches!(
+            check_list_apps_status(0x6e00),
+            Err(Error::DeviceOnDashboardExpected)
+        ));
+        assert!(matches!(
+            check_list_apps_status(0x5515),
+            Err(Error::DeviceLocked)
+        ));
+        assert!(matches!(
+            check_list_apps_status(0x5501),
+            Err(Error::UserRefusedAllowManager)
+        ));
+        assert!(matches!(
+            check_list_apps_status(0x6a80),
+            Err(Error::DeviceStatus(0x6a80))
+        ));
     }
 
     #[test]
