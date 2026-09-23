@@ -102,11 +102,20 @@ For now those commands are implemented:
 - `openapp`: open the Bitcoin app on your device
 - `checkfirm`: show the current firmware version of your device and whether an update is available
 - `updatefirm`: update the firmware of your device to the latest version
+- `repairfirm`: repair the firmware of a device stuck in bootloader mode, for instance because a
+  firmware update was interrupted while updating the MCU or the bootloader (like Ledger Live's
+  "repair your device"). Set `LEDGER_REPAIR_VERSION` to force the first version to flash, as
+  Ledger Live's repair options do (`0.7` if the device says "MCU outdated" or "MCU not genuine",
+  `0.9` if it tells to follow the repair or update instructions)
 
 Updating the firmware removes the applications installed on the device: reinstall the Bitcoin app
 with `installapp` afterwards. On Ledger Stax, Flex and Nano Gen5 the custom lock screen is not
 backed up (unlike with Ledger Live) and the language may have to be set again. Keep the device
-connected during the whole update, it may restart several times.
+connected during the whole update, it may restart several times. If the update gets interrupted,
+run `updatefirm` again (device in updater mode) or `repairfirm` (device in bootloader mode) to
+complete it. During the update, the device must answer each command within 2 minutes (except
+when waiting for a confirmation on the device), otherwise the update fails with a timeout rather
+than hanging. Other operations (installing apps, genuine check) have no such timeout.
 
 ### Examples
 
@@ -125,6 +134,11 @@ Success. Your Ledger is genuine.
 ```
 LEDGER_COMMAND=checkfirm cargo run -p ledger_manager_cli
 LEDGER_COMMAND=updatefirm cargo run -p ledger_manager_cli
+```
+
+If the device is stuck in bootloader mode after an interrupted update:
+```
+LEDGER_COMMAND=repairfirm cargo run -p ledger_manager_cli
 ```
 
 #### Installing the Bitcoin Test app on your Ledger

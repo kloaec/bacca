@@ -91,3 +91,11 @@ fn live_bitcoin_apps() {
         println!("{model}: Bitcoin app {}", bitcoin.version);
     }
 }
+
+#[test]
+#[ignore]
+fn live_mcus() {
+    // At the time of writing the API lists 169 MCU versions, which all parse.
+    let mcus = ledger_manager::fetch_mcus().unwrap();
+    assert!(mcus.len() > 100, "{} MCU versions", mcus.len());
+}

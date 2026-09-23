@@ -414,6 +414,17 @@ pub fn next_step(
     NextStep::InstallTarget
 }
 
+/// Adjust the step returned by [`next_step`] for a device whose firmware area is erased (for
+/// instance because a previous flash was interrupted). There is no intermediate firmware to boot
+/// then, even though the bootloader still reports its monotonic version: booting would only bring
+/// the device back to the bootloader, so install the intermediate firmware again instead.
+pub fn adjust_for_erased(step: NextStep, erased: bool) -> NextStep {
+    match step {
+        NextStep::BootIntermediate(i) if erased => NextStep::InstallIntermediate(i),
+        step => step,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +616,29 @@ mod tests {
                 NextStep::BootIntermediate(_)
             ));
             assert_eq!(step(p, 50, bl_new), NextStep::InstallTarget);
+        }
+        // An erased device can't boot the intermediate firmware, it must be installed again.
+        for p in [BitBox02Multi, BitBox02BtcOnly] {
+            assert!(matches!(
+                adjust_for_erased(step(p, 36, bl_old), true),
+                NextStep::InstallIntermediate(i) if i.monotonic_version == 36
+            ));
+            assert!(matches!(
+                adjust_for_erased(step(p, 50, bl_old), true),
+                NextStep::InstallIntermediate(i) if i.monotonic_version == 50
+            ));
+            assert!(matches!(
+                adjust_for_erased(step(p, 36, bl_old), false),
+                NextStep::BootIntermediate(i) if i.monotonic_version == 36
+            ));
+            assert!(matches!(
+                adjust_for_erased(step(p, 1, bl_old), true),
+                NextStep::InstallIntermediate(i) if i.monotonic_version == 36
+            ));
+            assert_eq!(
+                adjust_for_erased(step(p, 55, bl_new), true),
+                NextStep::InstallTarget
+            );
         }
         let i = intermediates(BitBox02BtcOnly)[0];
         assert!(i.boot_required(36, Version::new(9, 9, 9)));

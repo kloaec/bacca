@@ -15,6 +15,7 @@ pub mod apps;
 pub mod device;
 pub mod error;
 pub mod firmware;
+mod hid;
 pub mod model;
 pub mod socket;
 pub mod version;
@@ -40,7 +41,8 @@ pub use device::{
 pub use error::{Error, SocketContext, StatusCode};
 pub use firmware::{
     check_firmware_update_supported, firmware_update_resets_customization,
-    firmware_update_will_uninstall_apps, update_firmware, update_firmware_with_options,
+    firmware_update_will_uninstall_apps, format_hash_name, repair_firmware,
+    repair_firmware_with_options, update_firmware, update_firmware_with_options,
     FirmwareUpdateOptions, FirmwareUpdateStep,
 };
 pub use model::{DeviceModel, LEDGER_USB_VENDOR_ID};

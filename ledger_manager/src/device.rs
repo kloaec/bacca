@@ -81,7 +81,9 @@ fn is_ledger_interface(dev: &ledger_transport_hidapi::hidapi::DeviceInfo) -> boo
     dev.vendor_id() == LEDGER_USB_VENDOR_ID && dev.usage_page() == 0 && dev.interface_number() == 0
 }
 
-fn find_ledger(hid_api: &HidApi) -> Option<&ledger_transport_hidapi::hidapi::DeviceInfo> {
+pub(crate) fn find_ledger(
+    hid_api: &HidApi,
+) -> Option<&ledger_transport_hidapi::hidapi::DeviceInfo> {
     hid_api
         .device_list()
         .find(|d| is_ledger_usage_page(d))
@@ -577,6 +579,18 @@ impl DeviceInfo {
     /// Whether the device runs its OS normally (neither in bootloader nor updater mode).
     pub fn is_normal_mode(&self) -> bool {
         !self.is_bootloader && !self.is_osu
+    }
+
+    /// Return an error if the device doesn't run its OS normally: `Error::DeviceInBootloader`
+    /// in bootloader mode, `Error::DeviceOnDashboardExpected` in updater mode.
+    pub fn check_normal_mode(&self) -> Result<(), Error> {
+        if self.is_bootloader {
+            Err(Error::DeviceInBootloader)
+        } else if self.is_osu {
+            Err(Error::DeviceOnDashboardExpected)
+        } else {
+            Ok(())
+        }
     }
 }
 

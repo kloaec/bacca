@@ -575,12 +575,22 @@ pub fn update_firmware(
         }
         let bl = open_bootloader(&api, &handle)?;
         let (current, signing_pubkeys_version) = bl.versions()?;
-        match releases::next_step(
+        let mut step = releases::next_step(
             product,
             current,
             bl.version(),
             target.firmware.firmware_version(),
-        ) {
+        );
+        if matches!(step, NextStep::BootIntermediate(_)) {
+            // If the flash is erased (e.g. an interrupted install) there is nothing to boot:
+            // rebooting would only bring us back here. Install the intermediate again instead.
+            let erased = bl.erased()?;
+            if erased {
+                log::info!("Firmware is erased, reinstalling the intermediate firmware.");
+            }
+            step = releases::adjust_for_erased(step, erased);
+        }
+        match step {
             NextStep::BootIntermediate(i) => {
                 log::info!("Booting the intermediate firmware v{}", i.version);
                 progress(Progress::Rebooting);

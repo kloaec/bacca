@@ -83,6 +83,12 @@ pub enum Error {
     DeviceNotOnboarded,
     /// The device must be on its dashboard (no app opened, not in bootloader or updater mode).
     DeviceOnDashboardExpected,
+    /// The device is in bootloader mode, most likely because a firmware update was interrupted
+    /// while flashing the MCU or the bootloader. Use `firmware::repair_firmware` to complete it.
+    DeviceInBootloader,
+    /// The device shows "MCU not genuine" and must be brought back to its dashboard before the
+    /// firmware update can be performed (Ledger Live's `MCUNotGenuineToDashboard`).
+    McuNotGenuineToDashboard,
     /// The device was expected to be in the OS updater (OSU) mode.
     DeviceInOsuExpected,
     /// The device was expected to be in bootloader mode.
@@ -149,6 +155,14 @@ impl fmt::Display for Error {
             Error::DeviceOnDashboardExpected => write!(
                 f,
                 "Device must be on its dashboard. Please quit any application."
+            ),
+            Error::DeviceInBootloader => write!(
+                f,
+                "Device is in bootloader mode: a firmware update was probably interrupted. Repair the firmware (e.g. with the 'repairfirm' command) to complete the update."
+            ),
+            Error::McuNotGenuineToDashboard => write!(
+                f,
+                "Device must be on its dashboard to be updated. Disconnect and reconnect the USB cable without pressing any button, then press both buttons together three times to display the dashboard, and update the firmware."
             ),
             Error::DeviceInOsuExpected => write!(f, "Device was expected to be in updater mode."),
             Error::DeviceOnBootloaderExpected => {

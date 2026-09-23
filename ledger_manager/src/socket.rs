@@ -11,9 +11,13 @@ use crate::{
     LIVE_COMMON_VERSION,
 };
 
+use crate::hid::HidTransport;
+
 use ledger_apdu::APDUCommand;
 use ledger_transport_hidapi::TransportNativeHID;
 use serde_derive::Deserialize;
+
+use std::time::Duration;
 
 /// An event happening during a socket session with the HSM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,33 +62,134 @@ pub(crate) struct HsmMessage {
     pub result: Option<serde_json::Value>,
 }
 
-/// Deserialize an APDU command sent by the HSM as an hex string.
-pub(crate) fn deser_apdu_command(hex_str: &str) -> Result<APDUCommand<Vec<u8>>, Error> {
-    let bytes = hex::decode(hex_str).map_err(|e| {
-        Error::UnexpectedHsmMessage(format!("invalid APDU hex '{}': {}", hex_str, e))
-    })?;
-    if bytes.len() < 5 {
+fn decode_apdu_hex(hex_str: &str) -> Result<Vec<u8>, Error> {
+    hex::decode(hex_str)
+        .map_err(|e| Error::UnexpectedHsmMessage(format!("invalid APDU hex '{}': {}", hex_str, e)))
+}
+
+/// Map the raw bytes of an APDU sent by the HSM to an `APDUCommand`, which is what
+/// `TransportNativeHID` can send.
+///
+/// Ledger Live forwards the raw bytes to the device. `APDUCommand` however always serializes as
+/// `CLA INS P1 P2 Lc data` with `Lc` the length of `data`, so we map:
+/// - a 4 bytes APDU (ISO 7816 case 1, no `Lc`) to an empty `data`. It is sent with an additional
+///   `Lc` of 0, which the device treats the same;
+/// - `CLA INS P1 P2 Lc data` (case 3) to the given `data`, which is sent unchanged;
+/// - `CLA INS P1 P2 Lc data Le` (case 4) to the given `data`, dropping `Le` which Ledger devices
+///   don't use;
+/// - any other length mismatch to all the bytes after `Lc` as `data`, logging a warning. The
+///   `Lc` byte sent is then the actual length of the data, not the one given by the HSM.
+///
+/// Only an APDU shorter than a header or with more than 255 bytes of data is rejected. The
+/// firmware update sessions don't go through this mapping, they forward the raw bytes (see
+/// `TimeoutTransport`).
+pub(crate) fn deser_apdu_command(bytes: &[u8]) -> Result<APDUCommand<Vec<u8>>, Error> {
+    if bytes.len() < 4 {
         return Err(Error::UnexpectedHsmMessage(format!(
             "APDU too short: '{}'",
-            hex_str
+            hex::encode(bytes)
         )));
     }
-
-    let (cla, ins, p1, p2, data_len) = (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4] as usize);
-    if bytes.len() != 5 + data_len {
+    let (cla, ins, p1, p2) = (bytes[0], bytes[1], bytes[2], bytes[3]);
+    let data = match bytes.get(4) {
+        None => &[][..],
+        Some(&lc) => {
+            let lc = lc as usize;
+            let body = &bytes[5..];
+            if body.len() == lc {
+                body
+            } else if body.len() == lc + 1 {
+                log::trace!("Dropping the Le byte of APDU {}.", hex::encode(bytes));
+                &body[..lc]
+            } else {
+                log::warn!(
+                    "APDU length mismatch (Lc {}, {} bytes of data), forwarding the data as is: {}",
+                    lc,
+                    body.len(),
+                    hex::encode(bytes)
+                );
+                body
+            }
+        }
+    };
+    if data.len() > 255 {
         return Err(Error::UnexpectedHsmMessage(format!(
-            "APDU length mismatch: '{}'",
-            hex_str
+            "APDU too long: '{}'",
+            hex::encode(bytes)
         )));
     }
-
     Ok(APDUCommand {
         cla,
         ins,
         p1,
         p2,
-        data: bytes[5..].to_vec(),
+        data: data.to_vec(),
     })
+}
+
+/// A transport the APDUs of the HSM can be relayed through.
+pub(crate) trait HsmTransport {
+    /// An APDU ready to be sent.
+    type Command;
+
+    /// Check and convert the raw bytes of an APDU sent by the HSM. Called for all the APDUs of a
+    /// bulk before sending any of them.
+    fn prepare(&self, raw: Vec<u8>) -> Result<Self::Command, Error>;
+
+    /// Send an APDU to the device. `interactive` is set when the device may wait for the user
+    /// before answering.
+    fn send(
+        &self,
+        command: &Self::Command,
+        interactive: bool,
+    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error>;
+}
+
+impl HsmTransport for TransportNativeHID {
+    type Command = APDUCommand<Vec<u8>>;
+
+    fn prepare(&self, raw: Vec<u8>) -> Result<Self::Command, Error> {
+        deser_apdu_command(&raw)
+    }
+
+    fn send(
+        &self,
+        command: &Self::Command,
+        _interactive: bool,
+    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error> {
+        Ok(self.exchange(command)?)
+    }
+}
+
+/// The HID transport used for firmware updates: raw APDUs are forwarded as is, and the device
+/// must answer within `timeout` unless it waits for the user.
+pub(crate) struct TimeoutTransport<'a> {
+    pub transport: &'a HidTransport,
+    pub timeout: Duration,
+}
+
+impl HsmTransport for TimeoutTransport<'_> {
+    type Command = Vec<u8>;
+
+    fn prepare(&self, raw: Vec<u8>) -> Result<Self::Command, Error> {
+        if raw.is_empty() {
+            return Err(Error::UnexpectedHsmMessage("empty APDU".into()));
+        }
+        Ok(raw)
+    }
+
+    fn send(
+        &self,
+        command: &Self::Command,
+        interactive: bool,
+    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error> {
+        let timeout = if interactive {
+            None
+        } else {
+            Some(self.timeout)
+        };
+        self.transport.exchange_raw(command, timeout)
+    }
 }
 
 /// Build the URL of a scriptrunner endpoint (e.g. "install", "genuine", "mcu") with the given
@@ -116,15 +221,15 @@ enum Next {
 
 /// The state of a socket session, independent of the network. This is separated from the network
 /// loop to make it easier to reason about (and to test).
-struct Session<'a, F: FnMut(SocketEvent)> {
-    transport: &'a TransportNativeHID,
+struct Session<'a, T: HsmTransport, F: FnMut(SocketEvent)> {
+    transport: &'a T,
     on_event: F,
     /// An error originating from the device, cached until the next message from the HSM. If the
     /// socket gets closed without a result, this is the error we return.
     device_error: Option<Error>,
 }
 
-impl<F: FnMut(SocketEvent)> Session<'_, F> {
+impl<T: HsmTransport, F: FnMut(SocketEvent)> Session<'_, T, F> {
     /// Handle an "exchange" query: a single ping-pong APDU with the HSM. Returns the response to
     /// send back.
     fn exchange(&mut self, msg: &HsmMessage) -> Result<serde_json::Value, Error> {
@@ -136,15 +241,17 @@ impl<F: FnMut(SocketEvent)> Session<'_, F> {
                 ))
             }
         };
-        let command = deser_apdu_command(apdu_hex)?;
-
+        let raw = decode_apdu_hex(apdu_hex)?;
         // Detect the specific exchange that triggers the allow secure channel request.
-        let pending_user_allow_secure_channel = command.cla == 0xe0 && command.ins == 0x51;
+        let pending_user_allow_secure_channel = raw.starts_with(&[0xe0, 0x51]);
+        let command = self.transport.prepare(raw)?;
         if pending_user_allow_secure_channel {
             (self.on_event)(SocketEvent::DevicePermissionRequested);
         }
 
-        let resp = self.transport.exchange(&command)?;
+        let resp = self
+            .transport
+            .send(&command, pending_user_allow_secure_channel)?;
         let status = resp.retcode();
 
         let response = match status {
@@ -197,7 +304,9 @@ impl<F: FnMut(SocketEvent)> Session<'_, F> {
             .iter()
             .filter_map(|v| match v {
                 serde_json::Value::String(s) if s.is_empty() => None,
-                serde_json::Value::String(s) => Some(deser_apdu_command(s)),
+                serde_json::Value::String(s) => {
+                    Some(decode_apdu_hex(s).and_then(|raw| self.transport.prepare(raw)))
+                }
                 v => Some(Err(Error::UnexpectedHsmMessage(format!(
                     "invalid command in bulk: {}",
                     v
@@ -208,7 +317,11 @@ impl<F: FnMut(SocketEvent)> Session<'_, F> {
         let total = commands.len();
         (self.on_event)(SocketEvent::BulkProgress { index: 0, total });
         for (i, command) in commands.iter().enumerate() {
-            let resp = self.transport.exchange(command)?;
+            // The penultimate APDU of a firmware installation requires the user to confirm the
+            // update on the device (see `firmware::osu_step`), don't expect a quick answer for the
+            // last two.
+            let interactive = i + 2 >= total;
+            let resp = self.transport.send(command, interactive)?;
             if resp.retcode() != StatusCode::OK as u16 {
                 log::debug!(
                     "Device returned status {:#06x} for bulk APDU {}/{}.",
@@ -243,15 +356,30 @@ pub fn run_device_socket<F>(
 where
     F: FnMut(SocketEvent),
 {
-    run_device_socket_inner(ledger_api, url, on_event).map_err(|e| remap_socket_error(e, context))
+    run_hsm_session(ledger_api, url, context, on_event)
 }
 
-fn run_device_socket_inner<F>(
-    ledger_api: &TransportNativeHID,
+/// Same as `run_device_socket`, over any transport.
+pub(crate) fn run_hsm_session<T, F>(
+    transport: &T,
+    url: &str,
+    context: SocketContext,
+    on_event: F,
+) -> Result<Option<serde_json::Value>, Error>
+where
+    T: HsmTransport,
+    F: FnMut(SocketEvent),
+{
+    run_device_socket_inner(transport, url, on_event).map_err(|e| remap_socket_error(e, context))
+}
+
+fn run_device_socket_inner<T, F>(
+    ledger_api: &T,
     url: &str,
     on_event: F,
 ) -> Result<Option<serde_json::Value>, Error>
 where
+    T: HsmTransport,
     F: FnMut(SocketEvent),
 {
     // Don't log the parameters, they might contain sensitive tokens.
@@ -385,19 +513,22 @@ pub fn query_via_websocket(
 mod tests {
     use super::*;
 
+    fn deser(hex_str: &str) -> Result<APDUCommand<Vec<u8>>, Error> {
+        deser_apdu_command(&decode_apdu_hex(hex_str)?)
+    }
+
     #[test]
     fn apdu_deserialization() {
-        let cmd = deser_apdu_command("e0510000").unwrap_err();
-        assert!(matches!(cmd, Error::UnexpectedHsmMessage(_)));
-
-        let cmd = deser_apdu_command("e051000000").unwrap();
+        // Case 1: no Lc.
+        let cmd = deser("e0510000").unwrap();
         assert_eq!((cmd.cla, cmd.ins, cmd.p1, cmd.p2), (0xe0, 0x51, 0, 0));
         assert!(cmd.data.is_empty());
 
-        let cmd = deser_apdu_command("E0D80000074269746366F696E").unwrap_err();
-        assert!(matches!(cmd, Error::UnexpectedHsmMessage(_)));
+        let cmd = deser("e051000000").unwrap();
+        assert_eq!((cmd.cla, cmd.ins, cmd.p1, cmd.p2), (0xe0, 0x51, 0, 0));
+        assert!(cmd.data.is_empty());
 
-        let cmd = deser_apdu_command("e0d8000007426974636f696e").unwrap();
+        let cmd = deser("e0d8000007426974636f696e").unwrap();
         assert_eq!(cmd.ins, 0xd8);
         assert_eq!(cmd.data, b"Bitcoin");
         assert_eq!(
@@ -405,11 +536,30 @@ mod tests {
             hex::decode("e0d8000007426974636f696e").unwrap()
         );
 
-        // Length mismatch.
-        assert!(deser_apdu_command("e0d8000008426974636f696e").is_err());
-        assert!(deser_apdu_command("e0d8000006426974636f696e").is_err());
-        assert!(deser_apdu_command("zz").is_err());
-        assert!(deser_apdu_command("").is_err());
+        // Trailing Le.
+        let cmd = deser("e0d8000007426974636f696e00").unwrap();
+        assert_eq!(cmd.data, b"Bitcoin");
+        let cmd = deser("e0d800000000").unwrap();
+        assert!(cmd.data.is_empty());
+
+        // Other length mismatches: the data is forwarded as is.
+        let cmd = deser("e0d8000008426974636f696e").unwrap();
+        assert_eq!(cmd.data, b"Bitcoin");
+        let cmd = deser("e0d8000005426974636f696e").unwrap();
+        assert_eq!(cmd.data, b"Bitcoin");
+
+        // Invalid.
+        assert!(matches!(
+            deser("E0D80000074269746366F696E"),
+            Err(Error::UnexpectedHsmMessage(_))
+        ));
+        assert!(deser("e05100").is_err());
+        assert!(deser("zz").is_err());
+        assert!(deser("").is_err());
+        let long = format!("e0d80000ff{}", "00".repeat(257));
+        assert!(deser(&long).is_err());
+        let max = format!("e0d80000ff{}", "00".repeat(255));
+        assert_eq!(deser(&max).unwrap().data.len(), 255);
     }
 
     #[test]
