@@ -126,7 +126,9 @@ pub fn load(reporter: &Reporter) -> (bool, LedgerState, Option<FirmwareUpdateInf
     reporter.state(DeviceState::Ledger(Box::new(state.clone())));
 
     if info.is_bootloader {
-        reporter.status("Your Ledger is in bootloader mode. Please restart it.");
+        reporter.status(
+            "Your Ledger is in bootloader mode: a firmware update was probably interrupted. Click 'Repair' to finish it.",
+        );
         return (true, state, None);
     }
 
@@ -404,6 +406,31 @@ pub fn update_firmware(reporter: &Reporter, update: FirmwareUpdateInfo) -> TaskR
                 false,
             ),
             Err(e) => (format!("Error updating the firmware: {}", e), true),
+        },
+    };
+    TaskResult::Operation {
+        reload: true,
+        message: Some(message),
+    }
+}
+
+/// Finish a firmware update interrupted while the device was in bootloader mode, by flashing the
+/// MCU / bootloader it needs.
+pub fn repair_firmware(reporter: &Reporter) -> TaskResult {
+    log::info!("ledger::repair_firmware()");
+    let message = match HidApi::new() {
+        Err(e) => (format!("Error initializing HID api: {}.", e), true),
+        Ok(mut api) => match ledger_manager::repair_firmware(&mut api, None, |step| {
+            report_firmware_step(reporter, step)
+        }) {
+            Ok(info) => (
+                format!(
+                    "Successfully repaired the device, it now runs {}.",
+                    info.version
+                ),
+                false,
+            ),
+            Err(e) => (format!("Error repairing the firmware: {}", e), true),
         },
     };
     TaskResult::Operation {

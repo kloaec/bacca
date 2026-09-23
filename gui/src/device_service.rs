@@ -180,6 +180,8 @@ pub enum DeviceMessage {
     },
     GenuineCheck,
     UpdateFirmware,
+    /// Resume a Ledger firmware update interrupted while the device was in bootloader mode.
+    RepairFirmware,
 
     // To the GUI.
     State(DeviceState),
@@ -392,7 +394,8 @@ impl DeviceService {
             op @ (DeviceMessage::InstallApp { .. }
             | DeviceMessage::UpdateApp { .. }
             | DeviceMessage::GenuineCheck
-            | DeviceMessage::UpdateFirmware) => {
+            | DeviceMessage::UpdateFirmware
+            | DeviceMessage::RepairFirmware) => {
                 if self.busy {
                     // Another operation is running (the GUI should not have allowed it).
                     log::debug!("DeviceService: busy, ignoring {:?}", op);
@@ -540,6 +543,9 @@ impl DeviceService {
                     ));
                 }
             },
+            DeviceMessage::RepairFirmware if ledger.mode == LedgerMode::Bootloader => {
+                self.spawn_task(|r| ledger::repair_firmware(&r))
+            }
             op => self.drop_operation(&op),
         }
     }

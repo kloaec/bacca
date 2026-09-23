@@ -82,7 +82,9 @@ firmware hash (BitBox) displayed on the device match the ones shown by the GUI, 
 etc. Keep the device plugged in until the operation completes.
 
 After a Ledger firmware update the apps are removed from the device: the GUI refreshes the device
-information and offers to install the Bitcoin app again.
+information and offers to install the Bitcoin app again. If a Ledger firmware update was
+interrupted, run the GUI again: a Ledger in updater mode offers "Update" to finish it, and a Ledger
+in bootloader mode offers "Repair".
 
 We plan on releasing binaries in the future.
 

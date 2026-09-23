@@ -36,6 +36,7 @@ pub enum Message {
     GenuineCheck,
     /// Ask confirmation for the firmware update.
     UpdateFirmware,
+    RepairFirmware,
     ConfirmFirmwareUpdate,
     CancelFirmwareUpdate,
 
@@ -145,6 +146,7 @@ impl Application for Bacca {
                     self.confirm_firmware_update = true;
                 }
             }
+            Message::RepairFirmware => self.operation(DeviceMessage::RepairFirmware),
             Message::CancelFirmwareUpdate => self.confirm_firmware_update = false,
             Message::ConfirmFirmwareUpdate => {
                 self.confirm_firmware_update = false;
@@ -390,6 +392,14 @@ fn ledger_device_container(
         && matches!(ledger.mode, LedgerMode::Normal | LedgerMode::Updater);
     let update_msg = (!device_busy && can_update_firmware).then_some(Message::UpdateFirmware);
 
+    // A device in bootloader mode is stuck in an interrupted update: offer to finish it.
+    let latest_firmware: Element<'_, Message, Theme> = if ledger.mode == LedgerMode::Bootloader {
+        let repair_msg = (!device_busy).then_some(Message::RepairFirmware);
+        Button::new(" Repair ").on_press_maybe(repair_msg).into()
+    } else {
+        latest_firmware_value(&ledger.latest_firmware, update_msg).into()
+    };
+
     // allow user to check if device is genuine only once per launch
     let genuine: Element<'_, Message, Theme> = match ledger.genuine {
         None => Button::new("Check").on_press_maybe(genuine_msg).into(),
@@ -403,10 +413,7 @@ fn ledger_device_container(
             .spacing(5)
             .push(info_row("Model:", Text::new(model)))
             .push(info_row("Firmware:", Text::new(version)))
-            .push(info_row(
-                "Latest firmware:",
-                latest_firmware_value(&ledger.latest_firmware, update_msg),
-            ))
+            .push(info_row("Latest firmware:", latest_firmware))
             .push(info_row("Genuine:", genuine)),
     )
     .style(theme::Container::Frame)
