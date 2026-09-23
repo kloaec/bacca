@@ -11,7 +11,7 @@ use crate::{
 };
 
 use form_urlencoded::Serializer as UrlSerializer;
-use serde::{de::DeserializeOwned, Deserialize, Deserializer};
+use serde::{de::DeserializeOwned, Deserializer};
 use serde_derive::Deserialize;
 
 /// The salt used by Ledger Live for the incremental deployment of firmware updates. It is derived
@@ -87,9 +87,10 @@ pub(crate) fn post_json<T: DeserializeOwned>(
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
-    T: Default + Deserialize<'de>,
+    T: Default + serde::Deserialize<'de>,
 {
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+    let value: Option<T> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
 }
 
 /// A "device version", as the Ledger API calls a hardware version of a device model.
