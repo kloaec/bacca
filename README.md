@@ -63,11 +63,26 @@ rules](https://github.com/LedgerHQ/udev-rules) to access the device as a regular
 
 ### GUI
 
-The recommended way to use this software is through the GUI. Simply connect your Ledger device to
-the USB port and run:
+The recommended way to use this software is through the GUI. Simply connect your Ledger (or
+[BitBox](#bitbox)) device to the USB port, unlock it and run:
 ```
 cargo run -p ledger_manager_gui
 ```
+
+The GUI detects the connected device and shows:
+- the device model and its current firmware version;
+- the latest firmware available, with an "Update" button;
+- for a Ledger, whether it is genuine ("Check" button), and the installed and latest versions of
+  the Bitcoin and Bitcoin Test apps, with "Install" and "Update" buttons.
+
+Before updating the firmware, the GUI lists what the update implies and asks for confirmation. The
+progress of each operation is displayed at the bottom of the window, along with what to do on the
+device: allow the Ledger manager, check that the identifier (Ledger) or the pairing code and the
+firmware hash (BitBox) displayed on the device match the ones shown by the GUI, unlock the device,
+etc. Keep the device plugged in until the operation completes.
+
+After a Ledger firmware update the apps are removed from the device: the GUI refreshes the device
+information and offers to install the Bitcoin app again.
 
 We plan on releasing binaries in the future.
 
@@ -150,6 +165,14 @@ Updating from firmware mode requires unlocking the device, confirming a pairing 
 time, and confirming the reboot into the bootloader on the device. The pairing is remembered in
 `bitbox.json` in the config directory (`~/.config/bacca` on Linux, override with
 `BITBOX_CONFIG_DIR`).
+
+### GUI
+
+The GUI detects a BitBox as well: it shows the product, the edition, the firmware version (or the
+bootloader state) and the latest release, with an "Update" button. There is no app section for the
+BitBox: if a Multi edition is detected, the GUI recommends the Bitcoin-only edition. During the
+update, compare the pairing code and the firmware hash shown by the GUI with the ones displayed by
+the device.
 
 ### CLI
 
