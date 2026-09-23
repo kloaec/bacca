@@ -9,3 +9,5 @@ readme.workspace = true
 
 [dependencies]
 ledger_manager = { path = "../ledger_manager" }
+bitbox_manager = { path = "../bitbox_manager" }
+hex = "0.4"

@@ -1,3 +1,5 @@
+mod bitbox;
+
 use std::{env, process};
 
 use ledger_manager::{
@@ -137,6 +139,10 @@ fn open_app(ledger_api: &TransportNativeHID, is_testnet: bool) {
 }
 
 fn main() {
+    if bitbox::run_if_requested() {
+        return;
+    }
+
     let command = if let Some(cmd) = Command::get() {
         cmd
     } else {

@@ -1811,6 +1811,8 @@ dependencies = [
 name = "ledger_manager_cli"
 version = "0.1.0"
 dependencies = [
+ "bitbox_manager",
+ "hex",
  "ledger_manager",
 ]
 
