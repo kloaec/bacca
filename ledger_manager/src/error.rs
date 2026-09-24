@@ -37,6 +37,8 @@ pub enum Error {
     RefusedOnDevice(&'static str),
     NotEnoughSpace,
     AppAlreadyInstalled,
+    /// The app needs another app to be installed first.
+    AppDependencyMissing,
     AppNotInstalled,
     AppAlreadyLatest,
     /// Could not parse data returned by the device.
@@ -85,6 +87,9 @@ impl fmt::Display for Error {
                 "Not enough space on the device. Uninstall some applications and retry."
             ),
             Error::AppAlreadyInstalled => write!(f, "Application is already installed."),
+            Error::AppDependencyMissing => {
+                write!(f, "Application requires another application to be installed first.")
+            }
             Error::AppNotInstalled => write!(f, "Application is not installed."),
             Error::AppAlreadyLatest => write!(f, "Application is already at the latest version."),
             Error::InvalidDeviceData(s) => write!(f, "Invalid data from device: {}", s),

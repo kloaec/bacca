@@ -273,6 +273,7 @@ pub(crate) fn install_app(
                 | Error::RefusedOnDevice(_)
                 | Error::NotEnoughSpace
                 | Error::AppAlreadyInstalled
+                | Error::AppDependencyMissing
                 | Error::DeviceOnDashboardExpected),
             ) => return Err(e),
             Err(e) if attempt >= APP_INSTALL_RETRY_LIMIT => return Err(e),

@@ -382,6 +382,7 @@ fn remap_error(e: Error, context: Context) -> Error {
     let firmware = context == Context::Firmware;
     match status.as_str() {
         "6a80" | "6a81" | "6a8e" | "6a8f" if !firmware => Error::AppAlreadyInstalled,
+        "6a83" | "6811" if !firmware => Error::AppDependencyMissing,
         "6982" | "5303" | "5515" => Error::DeviceLocked,
         "6a84" | "5103" => Error::NotEnoughSpace,
         "6a85" | "5102" | "6985" | "5501" if firmware => {
@@ -502,6 +503,10 @@ mod tests {
         assert!(matches!(
             remap_error(status(0x6a80), Context::Firmware),
             Error::DeviceStatus(0x6a80)
+        ));
+        assert!(matches!(
+            remap_error(status(0x6a83), Context::App),
+            Error::AppDependencyMissing
         ));
         assert!(matches!(
             remap_error(Error::Hsm("invalid literal for int()".into()), Context::App),
