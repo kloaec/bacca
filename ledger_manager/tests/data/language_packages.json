@@ -1,0 +1,401 @@
+[
+ {
+  "id": 1,
+  "language": "qa-lingua",
+  "language_package_version": [],
+  "date_creation": "2022-05-13T09:45:12.681210Z",
+  "date_last_modified": "2022-05-13T09:45:12.681210Z"
+ },
+ {
+  "id": 54,
+  "language": "brazilian",
+  "language_package_version": [
+   {
+    "id": 986,
+    "version": "0.0.4",
+    "language_package_id": 54,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/brazilian/bolos_1.10.0_pack_0.0.4_br.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/brazilian/bolos_1.10.0_pack_0.0.4_br_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     559
+    ],
+    "bytes": 31680,
+    "date_creation": "2026-04-21T15:54:34.320608Z",
+    "date_last_modified": "2026-04-21T15:54:34.320608Z"
+   },
+   {
+    "id": 908,
+    "version": "0.0.4",
+    "language_package_id": 54,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/brazilian/bolos_1.9.1_pack_0.0.4_br.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/brazilian/bolos_1.9.1_pack_0.0.4_br_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     535
+    ],
+    "bytes": 33600,
+    "date_creation": "2026-01-08T16:13:30.444817Z",
+    "date_last_modified": "2026-01-08T16:13:30.444817Z"
+   },
+   {
+    "id": 771,
+    "version": "0.0.4",
+    "language_package_id": 54,
+    "apdu_install_url": "https://download.languages.ledger.com/nanosplus/brazilian/bolos_1.5.0-rc1_pack_0.0.4_br.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/nanosplus/brazilian/bolos_1.5.0-rc1_pack_0.0.4_br_del.apdu",
+    "device_versions": [
+     16
+    ],
+    "se_firmware_final_versions": [
+     501
+    ],
+    "bytes": 8960,
+    "date_creation": "2025-10-17T13:38:10.661106Z",
+    "date_last_modified": "2025-10-17T13:38:10.661106Z"
+   }
+  ],
+  "date_creation": "2024-06-07T10:37:29.064096Z",
+  "date_last_modified": "2024-06-07T10:37:29.064096Z"
+ },
+ {
+  "id": 55,
+  "language": "german",
+  "language_package_version": [
+   {
+    "id": 909,
+    "version": "0.0.4",
+    "language_package_id": 55,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/german/bolos_1.9.1_pack_0.0.4_de.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/german/bolos_1.9.1_pack_0.0.4_de_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     535
+    ],
+    "bytes": 28736,
+    "date_creation": "2026-01-08T16:13:32.036311Z",
+    "date_last_modified": "2026-01-08T16:13:32.036311Z"
+   },
+   {
+    "id": 987,
+    "version": "0.0.4",
+    "language_package_id": 55,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/german/bolos_1.10.0_pack_0.0.4_de.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/german/bolos_1.10.0_pack_0.0.4_de_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     559
+    ],
+    "bytes": 27392,
+    "date_creation": "2026-04-21T15:54:36.390430Z",
+    "date_last_modified": "2026-04-21T15:54:36.390430Z"
+   },
+   {
+    "id": 716,
+    "version": "0.0.4",
+    "language_package_id": 55,
+    "apdu_install_url": "https://download.languages.ledger.com/apex_p/german/bolos_0.0.2-rc2_pack_0.0.4_de.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/apex_p/german/bolos_0.0.2-rc2_pack_0.0.4_de_del.apdu",
+    "device_versions": [
+     136
+    ],
+    "se_firmware_final_versions": [
+     481
+    ],
+    "bytes": 21632,
+    "date_creation": "2025-09-15T09:18:44.662537Z",
+    "date_last_modified": "2025-09-15T09:18:44.662537Z"
+   }
+  ],
+  "date_creation": "2024-06-07T10:37:35.774406Z",
+  "date_last_modified": "2024-06-07T10:37:35.774406Z"
+ },
+ {
+  "id": 56,
+  "language": "russian",
+  "language_package_version": [
+   {
+    "id": 988,
+    "version": "0.0.4",
+    "language_package_id": 56,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/russian/bolos_1.10.0_pack_0.0.4_ru.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/russian/bolos_1.10.0_pack_0.0.4_ru_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     559
+    ],
+    "bytes": 56128,
+    "date_creation": "2026-04-21T15:54:38.497544Z",
+    "date_last_modified": "2026-04-21T15:54:38.497544Z"
+   },
+   {
+    "id": 910,
+    "version": "0.0.4",
+    "language_package_id": 56,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/russian/bolos_1.9.1_pack_0.0.4_ru.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/russian/bolos_1.9.1_pack_0.0.4_ru_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     535
+    ],
+    "bytes": 61632,
+    "date_creation": "2026-01-08T16:13:33.717475Z",
+    "date_last_modified": "2026-01-08T16:13:33.717475Z"
+   },
+   {
+    "id": 738,
+    "version": "0.0.4",
+    "language_package_id": 56,
+    "apdu_install_url": "https://download.languages.ledger.com/nanosplus/russian/bolos_1.4.1_pack_0.0.4_ru.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/nanosplus/russian/bolos_1.4.1_pack_0.0.4_ru_del.apdu",
+    "device_versions": [
+     16
+    ],
+    "se_firmware_final_versions": [
+     484
+    ],
+    "bytes": 14976,
+    "date_creation": "2025-09-29T12:44:15.701365Z",
+    "date_last_modified": "2025-09-29T12:44:15.701365Z"
+   }
+  ],
+  "date_creation": "2024-06-07T10:37:42.403126Z",
+  "date_last_modified": "2024-06-07T10:37:42.403126Z"
+ },
+ {
+  "id": 57,
+  "language": "turkish",
+  "language_package_version": [
+   {
+    "id": 989,
+    "version": "0.0.4",
+    "language_package_id": 57,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/turkish/bolos_1.10.0_pack_0.0.4_tr.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/turkish/bolos_1.10.0_pack_0.0.4_tr_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     559
+    ],
+    "bytes": 30144,
+    "date_creation": "2026-04-21T15:54:40.580838Z",
+    "date_last_modified": "2026-04-21T15:54:40.580838Z"
+   },
+   {
+    "id": 911,
+    "version": "0.0.4",
+    "language_package_id": 57,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/turkish/bolos_1.9.1_pack_0.0.4_tr.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/turkish/bolos_1.9.1_pack_0.0.4_tr_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     535
+    ],
+    "bytes": 31616,
+    "date_creation": "2026-01-08T16:13:35.481435Z",
+    "date_last_modified": "2026-01-08T16:13:35.481435Z"
+   },
+   {
+    "id": 306,
+    "version": "0.0.4",
+    "language_package_id": 57,
+    "apdu_install_url": "https://download.languages.ledger.com/nanox/turkish/bolos_2.4.0-rc2_pack_0.0.4_tr.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/nanox/turkish/bolos_2.4.0-rc2_pack_0.0.4_tr_del.apdu",
+    "device_versions": [
+     9
+    ],
+    "se_firmware_final_versions": [
+     401
+    ],
+    "bytes": 8704,
+    "date_creation": "2024-10-28T08:47:38.947887Z",
+    "date_last_modified": "2024-10-28T08:47:38.947887Z"
+   }
+  ],
+  "date_creation": "2024-06-07T10:37:49.135870Z",
+  "date_last_modified": "2024-06-07T10:37:49.135870Z"
+ },
+ {
+  "id": 34,
+  "language": "french",
+  "language_package_version": [
+   {
+    "id": 983,
+    "version": "0.0.4",
+    "language_package_id": 34,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/french/bolos_1.10.0_pack_0.0.4_fr.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/french/bolos_1.10.0_pack_0.0.4_fr_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     559
+    ],
+    "bytes": 30784,
+    "date_creation": "2026-04-21T15:54:27.681054Z",
+    "date_last_modified": "2026-04-21T15:54:27.681054Z"
+   },
+   {
+    "id": 905,
+    "version": "0.0.4",
+    "language_package_id": 34,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/french/bolos_1.9.1_pack_0.0.4_fr.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/french/bolos_1.9.1_pack_0.0.4_fr_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     535
+    ],
+    "bytes": 32320,
+    "date_creation": "2026-01-08T16:13:25.518577Z",
+    "date_last_modified": "2026-01-08T16:13:25.518577Z"
+   },
+   {
+    "id": 113,
+    "version": "0.0.4",
+    "language_package_id": 34,
+    "apdu_install_url": "https://download.languages.ledger.com/nanox/french/bolos_2.3.0-rc1_pack_0.0.4_fr.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/nanox/french/bolos_2.3.0-rc1_pack_0.0.4_fr_del.apdu",
+    "device_versions": [
+     9
+    ],
+    "se_firmware_final_versions": [
+     307
+    ],
+    "bytes": 8384,
+    "date_creation": "2023-05-17T14:01:08.732971Z",
+    "date_last_modified": "2023-05-17T14:01:08.732971Z"
+   }
+  ],
+  "date_creation": "2022-07-22T16:38:12.613073Z",
+  "date_last_modified": "2022-07-22T16:38:12.613073Z"
+ },
+ {
+  "id": 35,
+  "language": "spanish",
+  "language_package_version": [
+   {
+    "id": 984,
+    "version": "0.0.4",
+    "language_package_id": 35,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/spanish/bolos_1.10.0_pack_0.0.4_es.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/spanish/bolos_1.10.0_pack_0.0.4_es_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     559
+    ],
+    "bytes": 29696,
+    "date_creation": "2026-04-21T15:54:29.895002Z",
+    "date_last_modified": "2026-04-21T15:54:29.895002Z"
+   },
+   {
+    "id": 906,
+    "version": "0.0.4",
+    "language_package_id": 35,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/spanish/bolos_1.9.1_pack_0.0.4_es.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/spanish/bolos_1.9.1_pack_0.0.4_es_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     535
+    ],
+    "bytes": 31104,
+    "date_creation": "2026-01-08T16:13:27.138205Z",
+    "date_last_modified": "2026-01-08T16:13:27.138205Z"
+   },
+   {
+    "id": 457,
+    "version": "0.0.4",
+    "language_package_id": 35,
+    "apdu_install_url": "https://download.languages.ledger.com/nanosplus/spanish/bolos_1.3.2_pack_0.0.4_es.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/nanosplus/spanish/bolos_1.3.2_pack_0.0.4_es_del.apdu",
+    "device_versions": [
+     16
+    ],
+    "se_firmware_final_versions": [
+     430
+    ],
+    "bytes": 8448,
+    "date_creation": "2025-03-04T10:48:21.308547Z",
+    "date_last_modified": "2025-03-04T10:48:21.308547Z"
+   }
+  ],
+  "date_creation": "2022-07-22T16:38:16.921283Z",
+  "date_last_modified": "2022-07-22T16:38:16.921283Z"
+ },
+ {
+  "id": 36,
+  "language": "english",
+  "language_package_version": [
+   {
+    "id": 985,
+    "version": "0.0.4",
+    "language_package_id": 36,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/english/bolos_1.10.0_pack_0.0.4_en.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/english/bolos_1.10.0_pack_0.0.4_en_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     559
+    ],
+    "bytes": 24000,
+    "date_creation": "2026-04-21T15:54:32.104007Z",
+    "date_last_modified": "2026-04-21T15:54:32.104007Z"
+   },
+   {
+    "id": 907,
+    "version": "0.0.4",
+    "language_package_id": 36,
+    "apdu_install_url": "https://download.languages.ledger.com/stax/english/bolos_1.9.1_pack_0.0.4_en.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/stax/english/bolos_1.9.1_pack_0.0.4_en_del.apdu",
+    "device_versions": [
+     17
+    ],
+    "se_firmware_final_versions": [
+     535
+    ],
+    "bytes": 24896,
+    "date_creation": "2026-01-08T16:13:28.842390Z",
+    "date_last_modified": "2026-01-08T16:13:28.842390Z"
+   },
+   {
+    "id": 604,
+    "version": "0.0.4",
+    "language_package_id": 36,
+    "apdu_install_url": "https://download.languages.ledger.com/nanosplus/english/bolos_1.4.0-rc3_pack_0.0.4_en.apdu",
+    "apdu_uninstall_url": "https://download.languages.ledger.com/nanosplus/english/bolos_1.4.0-rc3_pack_0.0.4_en_del.apdu",
+    "device_versions": [
+     16
+    ],
+    "se_firmware_final_versions": [
+     457
+    ],
+    "bytes": 7424,
+    "date_creation": "2025-07-18T10:01:34.657359Z",
+    "date_last_modified": "2025-07-18T10:01:34.657359Z"
+   }
+  ],
+  "date_creation": "2022-07-27T14:46:53.122323Z",
+  "date_last_modified": "2022-07-27T14:46:53.122323Z"
+ }
+]

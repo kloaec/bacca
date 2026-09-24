@@ -1,0 +1,20 @@
+[package]
+name = "jade_manager"
+version = "0.1.0"
+authors = ["Wizardsardine"]
+keywords = ["bitcoin", "jade", "firmware", "upgrade"]
+description = "Update the firmware of Blockstream Jade devices without the Blockstream app."
+
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+
+[dependencies]
+log = "0.4"
+# No libudev: on Linux the ports are enumerated from sysfs.
+serialport = { version = "=4.10.1", default-features = false }
+minreq = { version = "3.0", features = ["https", "json-using-serde", "proxy"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"

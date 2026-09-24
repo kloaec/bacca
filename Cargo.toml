@@ -1,8 +1,8 @@
 [workspace]
-members = ["ledger_manager", "cli", "gui"]
+members = ["ledger_manager", "bitbox_manager", "jade_manager", "cli", "gui"]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-license-file = "LICENCE"
+license = "MIT"
 readme = "README.md"

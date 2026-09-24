@@ -1,38 +1,23 @@
+mod bitbox;
 mod gui;
-mod ledger_service;
+mod jade;
+mod ledger;
 mod logger;
-mod service;
 mod theme;
+mod worker;
 
-use crate::{
-    gui::{Flags, LedgerInstaller},
-    ledger_service::LedgerService,
-    service::ServiceFn,
-};
-use iced::{window::icon, Application, Settings, Size};
+use iced::{window, Application, Settings, Size};
 
-#[tokio::main]
-async fn main() {
-    logger::set_logger(true);
-
-    let (ledger_sender, gui_ledger_receiver) = async_channel::unbounded();
-    let (gui_ledger_sender, ledger_receiver) = async_channel::unbounded();
-
-    let flags = Flags {
-        ledger_sender: gui_ledger_sender.clone(),
-        ledger_receiver: gui_ledger_receiver,
-    };
-
-    let ledger = LedgerService::new(ledger_sender, ledger_receiver, gui_ledger_sender);
-    ledger.start();
-
-    const ICON: &[u8] = include_bytes!("./sardine.png");
-    let icon = icon::from_file_data(ICON, None).unwrap();
-
-    let mut settings = Settings::with_flags(flags);
-    settings.window.size = Size::new(500.0, 450.0);
-    settings.window.resizable = false;
-    settings.window.icon = Some(icon);
-
-    LedgerInstaller::run(settings).expect("Fail to launch application!")
+fn main() -> iced::Result {
+    logger::set_logger();
+    gui::Bacca::run(Settings {
+        fonts: vec![include_bytes!("iconex-icons.ttf").as_slice().into()],
+        window: window::Settings {
+            size: Size::new(560.0, 640.0),
+            resizable: false,
+            icon: window::icon::from_file_data(include_bytes!("sardine.png"), None).ok(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
 }

@@ -1,0 +1,26 @@
+[package]
+name = "bitbox_manager"
+version = "0.1.0"
+authors = ["Wizardsardine"]
+keywords = ["bitcoin", "bitbox", "firmware", "upgrade"]
+description = "Update the firmware of BitBox02 devices without the BitBoxApp."
+
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+
+[dependencies]
+log = "0.4"
+# Use the same hidapi backend as ledger-transport-hidapi so both libs share a single hidapi build.
+hidapi = { version = "2.4.1", default-features = false, features = ["linux-static-hidraw"] }
+minreq = { version = "3.0", features = ["https", "json-using-serde", "proxy"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+getrandom = "0.2"
+noise-protocol = "0.2"
+noise-rust-crypto = { version = "0.6", default-features = false, features = ["use-x25519", "use-chacha20poly1305", "use-sha2"] }
+
+[dev-dependencies]
+flate2 = "1"
