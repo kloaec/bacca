@@ -23,6 +23,7 @@ enum Command {
     UpdateFirmware,
     FlashFile,
     HashFile,
+    Reboot,
 }
 
 impl Command {
@@ -33,6 +34,7 @@ impl Command {
             "updatefirm" => Some(Self::UpdateFirmware),
             "flashfile" => Some(Self::FlashFile),
             "hashfile" => Some(Self::HashFile),
+            "reboot" => Some(Self::Reboot),
             _ => None,
         }
     }
@@ -48,7 +50,7 @@ pub fn run_if_requested() -> bool {
         Some(c) => c,
         None => error!(
             "Invalid BITBOX_COMMAND '{}'. Valid commands: getinfo, checkfirm, updatefirm, \
-             flashfile (with BITBOX_FIRMWARE_FILE), hashfile (with BITBOX_FIRMWARE_FILE).",
+             flashfile (with BITBOX_FIRMWARE_FILE), hashfile (with BITBOX_FIRMWARE_FILE), reboot.",
             cmd_str
         ),
     };
@@ -62,8 +64,32 @@ pub fn run_if_requested() -> bool {
             update(FirmwareSource::File(fw))
         }
         Command::HashFile => describe_firmware(&firmware_file()),
+        Command::Reboot => reboot(),
     }
     true
+}
+
+/// Leave the bootloader: reboot the device, clearing its "start in bootloader mode" flag.
+fn reboot() {
+    let api = match bitbox_manager::hidapi::HidApi::new() {
+        Ok(a) => a,
+        Err(e) => error!("Error initializing HID api: {}.", e),
+    };
+    let handle = match bitbox_manager::find_device(&api) {
+        Ok(h) => h,
+        Err(e) => error!("Error: {}.", e),
+    };
+    if handle.mode != bitbox_manager::Mode::Bootloader {
+        error!("The BitBox is not in bootloader mode.");
+    }
+    let bl = match bitbox_manager::open_bootloader(&api, &handle) {
+        Ok(b) => b,
+        Err(e) => error!("Error opening the bootloader: {}.", e),
+    };
+    if let Err(e) = bl.reboot() {
+        error!("Error rebooting the device: {}.", e);
+    }
+    println!("Rebooted the device.");
 }
 
 fn firmware_file() -> SignedFirmware {
@@ -185,7 +211,6 @@ fn options() -> UpdateOptions {
         noise_config,
         show_firmware_hash,
         force: env::var_os("BITBOX_FORCE").is_some(),
-        skip_bootloader_upgrade: env::var_os("BITBOX_SKIP_BOOTLOADER_UPGRADE").is_some(),
     }
 }
 
@@ -239,13 +264,6 @@ fn print_progress(p: Progress) {
         Progress::WaitingForIntermediateBoot { version } => println!(
             "Booting the intermediate firmware v{}, this can take a minute. Do not unplug the device. If your BitBox shows 'DEV DEVICE' (development bootloader), slide <Continue> (bottom) on the device to boot it. If it then stays on 'Development bootloader', unplug and replug it.",
             version
-        ),
-        Progress::BootloaderUpgradeSkipped {
-            version,
-            bootloader_version,
-        } => println!(
-            "Your BitBox kept its bootloader v{}: the bootloader upgrade of the intermediate firmware v{} was refused (it always is on a development bootloader). Installing the firmware directly instead.",
-            bootloader_version, version
         ),
         Progress::Done => println!("Done."),
     }

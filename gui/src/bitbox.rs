@@ -174,13 +174,6 @@ fn report_progress(reporter: &Reporter, progress: Progress) {
                 version
             ))
         }
-        Progress::BootloaderUpgradeSkipped {
-            version,
-            bootloader_version,
-        } => reporter.status(format!(
-            "Your BitBox kept its bootloader v{}: the bootloader upgrade of the intermediate firmware v{} was refused (it always is on a development bootloader). Installing the firmware directly instead.",
-            bootloader_version, version
-        )),
         Progress::Done => reporter.progress(None),
     }
 }

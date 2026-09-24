@@ -252,13 +252,16 @@ The BitBox commands are passed through the `BITBOX_COMMAND` environment variable
 - `hashfile`: show information and the hash of the signed firmware file at `BITBOX_FIRMWARE_FILE`
 
 Optional: set `BITBOX_SHOW_HASH=1` (or `0`) to make the device show (or not) the firmware hash on
-every boot, `BITBOX_FORCE` to reinstall the same firmware.
+every boot, `BITBOX_FORCE` to reinstall the same firmware. `BITBOX_COMMAND=reboot` makes a device in
+bootloader mode reboot (and clears its "start in bootloader mode" flag).
 
-Development bootloader: the intermediate firmware v9.26.2 only upgrades the bootloader, and it refuses
-to replace a development bootloader (the device then halts on "Development bootloader"; unplug and
-replug it, it restarts in bootloader mode). The update detects this and installs the latest firmware
-directly, or skip that step from the start with `BITBOX_SKIP_BOOTLOADER_UPGRADE=1`. A development
-bootloader also waits for you to slide `<Continue>` on its "DEV DEVICE" screen to boot the firmware.
+Development bootloader: the intermediate firmware v9.26.2 upgrades the bootloader to v1.2.2, and it
+refuses to replace a development bootloader (the device then halts on "Development bootloader";
+unplug and replug it). The firmware releases after v9.26.2 are only signed for bootloaders v1.2.0 and
+later, so a device with an old development bootloader can't be updated past v9.26.2: the update
+stops with an explanation, and refuses to flash a firmware the bootloader would reject. A
+development bootloader also waits for you to slide `<Continue>` on its "DEV DEVICE" screen to boot
+the firmware.
 
 ```
 BITBOX_COMMAND=updatefirm cargo run -p ledger_manager_cli

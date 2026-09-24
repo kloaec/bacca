@@ -85,6 +85,17 @@ pub enum Error {
     IntermediateNotBooted {
         version: Version,
     },
+    /// The intermediate firmware upgrading the bootloader was booted but the bootloader wasn't
+    /// upgraded (always the case for a development bootloader).
+    BootloaderUpgradeRefused {
+        version: Version,
+        bootloader_version: Version,
+    },
+    /// The firmware isn't signed for the device's (old) bootloader.
+    BootloaderTooOld {
+        bootloader_version: Version,
+        firmware_version: u32,
+    },
 }
 
 impl fmt::Display for Error {
@@ -134,6 +145,22 @@ impl fmt::Display for Error {
             ),
             Self::Timeout(what) => write!(f, "timeout {}", what),
             Self::UpgradeStuck => write!(f, "the upgrade did not complete"),
+            Self::BootloaderUpgradeRefused {
+                version,
+                bootloader_version,
+            } => write!(
+                f,
+                "the intermediate firmware v{} did not upgrade the bootloader (still v{}). A development bootloader can't be upgraded: the firmware releases after v9.26.2 are only signed for bootloaders v1.2.0 and later, so they can't be installed on this device. Nothing else was written: unplug and replug the device",
+                version, bootloader_version
+            ),
+            Self::BootloaderTooOld {
+                bootloader_version,
+                firmware_version,
+            } => write!(
+                f,
+                "this firmware (monotonic version {}) requires a bootloader v1.2.0 or later, the device has v{}. Install the intermediate firmware v9.26.2 first to upgrade the bootloader",
+                firmware_version, bootloader_version
+            ),
             Self::IntermediateNotBooted { version } => write!(
                 f,
                 "the intermediate firmware v{} did not boot. If your BitBox shows 'DEV DEVICE' when it starts, slide <Continue> (bottom) to boot the firmware, then run the update again",
@@ -373,6 +400,7 @@ pub fn check_flashable(
     device_product: Product,
     installed_firmware_version: u32,
     installed_signing_pubkeys_version: u32,
+    bootloader_version: Version,
 ) -> Result<(), Error> {
     if firmware.product() != device_product {
         return Err(Error::WrongProduct {
@@ -390,6 +418,12 @@ pub fn check_flashable(
         return Err(Error::SigningKeysDowngrade {
             installed: installed_signing_pubkeys_version,
             firmware: firmware.signing_pubkeys_version(),
+        });
+    }
+    if !SighashScheme::bootloader_accepts(bootloader_version, firmware.firmware_version()) {
+        return Err(Error::BootloaderTooOld {
+            bootloader_version,
+            firmware_version: firmware.firmware_version(),
         });
     }
     Ok(())
@@ -444,14 +478,6 @@ pub enum Progress {
     WaitingForIntermediateBoot {
         version: Version,
     },
-    /// The intermediate firmware upgrading the bootloader was booted, but the device came back
-    /// with its old bootloader. This is expected on a development bootloader, which the upgrade
-    /// refuses to replace. The upgrade continues without it: the target firmware is installed
-    /// directly (it does not require the new bootloader).
-    BootloaderUpgradeSkipped {
-        version: Version,
-        bootloader_version: Version,
-    },
     Done,
 }
 
@@ -471,11 +497,6 @@ pub struct UpdateOptions {
     pub show_firmware_hash: Option<bool>,
     /// Reinstall even if the same firmware is already installed.
     pub force: bool,
-    /// Don't boot the intermediate firmwares whose purpose is to upgrade the bootloader, install
-    /// the next firmware directly instead. Needed for a development bootloader, which such an
-    /// intermediate refuses to replace: it then halts on "Development bootloader". The firmware
-    /// doesn't require the upgraded bootloader.
-    pub skip_bootloader_upgrade: bool,
 }
 
 impl Default for UpdateOptions {
@@ -484,7 +505,6 @@ impl Default for UpdateOptions {
             noise_config: Box::new(noise_config::NoiseConfigNoCache),
             show_firmware_hash: None,
             force: false,
-            skip_bootloader_upgrade: false,
         }
     }
 }
@@ -592,15 +612,6 @@ pub fn update_firmware(
     // Intermediates (by monotonic version) that were booted already during this upgrade.
     let mut booted: Vec<u32> = Vec::new();
     // Intermediates skipped because booting them did not have the expected effect.
-    let mut skipped: Vec<u32> = if options.skip_bootloader_upgrade {
-        releases::intermediates(product)
-            .iter()
-            .filter(|i| matches!(i.completion, IntermediateCompletion::BootloaderVersion(_)))
-            .map(|i| i.monotonic_version)
-            .collect()
-    } else {
-        Vec::new()
-    };
     for _ in 0..MAX_UPGRADE_STEPS {
         let handle = wait_for_device(&mut api, product, Duration::ZERO)?;
         if handle.mode == Mode::Firmware {
@@ -615,7 +626,7 @@ pub fn update_firmware(
             current,
             bl.version(),
             target.firmware.firmware_version(),
-            &skipped,
+            &[],
         );
         if matches!(step, NextStep::BootIntermediate(_)) {
             // If the flash is erased (e.g. an interrupted install) there is nothing to boot:
@@ -628,6 +639,7 @@ pub fn update_firmware(
         }
         if let NextStep::BootIntermediate(i) = step {
             if booted.contains(&i.monotonic_version) {
+                let v = bl.version();
                 // We already booted it, and the device is back in the bootloader without the
                 // expected effect.
                 match i.completion {
@@ -635,20 +647,16 @@ pub fn update_firmware(
                         // The bootloader upgrade was refused. It always is on a development
                         // bootloader ("Development bootloader" on the device's screen), see
                         // `bootloader_upgrade_install_or_reboot()` in
-                        // bitbox02-firmware/src/bootloader_upgrade/firmware_installer.c. This
-                        // intermediate is only a bootloader installer, it can't be used as a
-                        // firmware: install the next firmware over it instead.
-                        log::warn!(
-                            "The bootloader upgrade of v{} did not happen (bootloader still v{}), skipping it.",
-                            i.version,
-                            bl.version()
-                        );
-                        progress(Progress::BootloaderUpgradeSkipped {
-                            version: i.version,
-                            bootloader_version: bl.version(),
-                        });
-                        skipped.push(i.monotonic_version);
-                        continue;
+                        // bitbox02-firmware/src/bootloader_upgrade/firmware_installer.c. The
+                        // releases after this intermediate can't be installed on the old
+                        // bootloader (see `SighashScheme::bootloader_accepts`), so stop here.
+                        return Err(reboot_on_error(
+                            bl,
+                            Error::BootloaderUpgradeRefused {
+                                version: i.version,
+                                bootloader_version: v,
+                            },
+                        ));
                     }
                     IntermediateCompletion::MonotonicVersionBump => {
                         return Err(reboot_on_error(
@@ -674,7 +682,7 @@ pub fn update_firmware(
                     intermediate: true,
                 });
                 let firmware = match i.download(product).map_err(Error::from).and_then(|fw| {
-                    check_flashable(&fw, product, current, signing_pubkeys_version)?;
+                    check_flashable(&fw, product, current, signing_pubkeys_version, bl.version())?;
                     Ok(fw)
                 }) {
                     Ok(fw) => fw,
@@ -688,9 +696,13 @@ pub fn update_firmware(
                 wait_for_reboot(&mut api, product)?;
             }
             NextStep::InstallTarget => {
-                if let Err(e) =
-                    check_flashable(&target.firmware, product, current, signing_pubkeys_version)
-                {
+                if let Err(e) = check_flashable(
+                    &target.firmware,
+                    product,
+                    current,
+                    signing_pubkeys_version,
+                    bl.version(),
+                ) {
                     return Err(reboot_on_error(bl, e));
                 }
                 let target_hash = target.firmware.sighash(bl.sighash_scheme());
@@ -909,29 +921,49 @@ mod tests {
     fn flashable() {
         let fw = fixture();
         // Version 50, signing keys version 3.
-        assert!(check_flashable(&fw, Product::BitBox02BtcOnly, 0, 0).is_ok());
-        assert!(check_flashable(&fw, Product::BitBox02BtcOnly, 50, 3).is_ok());
+        assert!(
+            check_flashable(&fw, Product::BitBox02BtcOnly, 0, 0, Version::new(1, 2, 2)).is_ok()
+        );
+        assert!(
+            check_flashable(&fw, Product::BitBox02BtcOnly, 50, 3, Version::new(1, 2, 2)).is_ok()
+        );
         assert!(matches!(
-            check_flashable(&fw, Product::BitBox02Multi, 0, 0),
+            check_flashable(&fw, Product::BitBox02Multi, 0, 0, Version::new(1, 2, 2)),
             Err(Error::WrongProduct {
                 device: Product::BitBox02Multi,
                 firmware: Product::BitBox02BtcOnly
             })
         ));
         assert!(matches!(
-            check_flashable(&fw, Product::BitBox02NovaBtcOnly, 0, 0),
+            check_flashable(
+                &fw,
+                Product::BitBox02NovaBtcOnly,
+                0,
+                0,
+                Version::new(1, 2, 2)
+            ),
             Err(Error::WrongProduct { .. })
         ));
         assert!(matches!(
-            check_flashable(&fw, Product::BitBox02BtcOnly, 55, 3),
+            check_flashable(&fw, Product::BitBox02BtcOnly, 55, 3, Version::new(1, 2, 2)),
             Err(Error::Downgrade {
                 installed: 55,
                 firmware: 50
             })
         ));
         assert!(matches!(
-            check_flashable(&fw, Product::BitBox02BtcOnly, 50, 4),
+            check_flashable(&fw, Product::BitBox02BtcOnly, 50, 4, Version::new(1, 2, 2)),
             Err(Error::SigningKeysDowngrade { .. })
         ));
+        // v9.26.2 (the fixture) is still signed for the old bootloaders, later releases aren't.
+        let old_bl = Version::new(1, 0, 5);
+        assert!(check_flashable(&fw, Product::BitBox02BtcOnly, 36, 3, old_bl).is_ok());
+        assert!(SighashScheme::bootloader_accepts(old_bl, 50));
+        assert!(!SighashScheme::bootloader_accepts(old_bl, 51));
+        assert!(!SighashScheme::bootloader_accepts(
+            Version::new(1, 1, 9),
+            55
+        ));
+        assert!(SighashScheme::bootloader_accepts(Version::new(1, 2, 0), 55));
     }
 }

@@ -41,6 +41,11 @@ pub const NEW_SIGHASH_FIRMWARE_VERSION_CUTOFF: u32 = 50;
 /// Bootloaders from this version compute the firmware hash with the new scheme
 /// (`BOOTLOADER_NEW_SIGHASH_VERSION` in `py/bitbox02/bitbox02/bitbox02/bootloader.py`).
 pub const BOOTLOADER_NEW_SIGHASH_VERSION: Version = Version::new(1, 2, 0);
+/// The first monotonic firmware version (v9.26.3) only signed for the new sighash scheme, so that
+/// a bootloader older than [`BOOTLOADER_NEW_SIGHASH_VERSION`] rejects its signatures. Checked on
+/// the official releases: v9.26.2 (monotonic version 50, the bootloader upgrade) is only signed
+/// for the legacy scheme, v9.26.3 (51) and later only for the new one.
+pub const FIRST_FIRMWARE_VERSION_REQUIRING_NEW_BOOTLOADER: u32 = 51;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirmwareFormatError {
@@ -89,6 +94,13 @@ impl SighashScheme {
         } else {
             SighashScheme::Legacy
         }
+    }
+
+    /// Whether a bootloader of this version can accept the signatures of a firmware with this
+    /// monotonic version.
+    pub fn bootloader_accepts(bootloader_version: Version, firmware_version: u32) -> bool {
+        bootloader_version >= BOOTLOADER_NEW_SIGHASH_VERSION
+            || firmware_version < FIRST_FIRMWARE_VERSION_REQUIRING_NEW_BOOTLOADER
     }
 
     /// The scheme used for the hashes published in the release notes of a firmware with the
