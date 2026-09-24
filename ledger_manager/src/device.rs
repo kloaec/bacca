@@ -38,6 +38,23 @@ const QUIT_APP_COMMAND: APDUCommand<&[u8]> = APDUCommand {
     data: &[],
 };
 
+/// Something APDUs can be exchanged with: the device, or a simulated one in tests.
+pub(crate) trait ApduExchange {
+    fn exchange_apdu(
+        &self,
+        command: &APDUCommand<Vec<u8>>,
+    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error>;
+}
+
+impl ApduExchange for TransportNativeHID {
+    fn exchange_apdu(
+        &self,
+        command: &APDUCommand<Vec<u8>>,
+    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error> {
+        Ok(self.exchange(command)?)
+    }
+}
+
 /// The USB usage page of the Ledger HID interface.
 const LEDGER_USAGE_PAGE: u16 = 0xffa0;
 
@@ -711,6 +728,46 @@ where
             return Err(Error::Timeout("waiting for the device"));
         }
         thread::sleep(interval);
+    }
+}
+
+/// A simulated device for the tests.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+    use std::cell::RefCell;
+
+    type Handler = Box<dyn FnMut(&APDUCommand<Vec<u8>>) -> (Vec<u8>, u16)>;
+
+    /// Answers the APDUs with a handler, and records them (serialized as `CLA INS P1 P2 Lc data`).
+    pub struct MockDevice {
+        handler: RefCell<Handler>,
+        sent: RefCell<Vec<Vec<u8>>>,
+    }
+
+    impl MockDevice {
+        pub fn new(handler: impl FnMut(&APDUCommand<Vec<u8>>) -> (Vec<u8>, u16) + 'static) -> Self {
+            Self {
+                handler: RefCell::new(Box::new(handler)),
+                sent: RefCell::new(Vec::new()),
+            }
+        }
+
+        pub fn sent(&self) -> Vec<Vec<u8>> {
+            self.sent.borrow().clone()
+        }
+    }
+
+    impl ApduExchange for MockDevice {
+        fn exchange_apdu(
+            &self,
+            command: &APDUCommand<Vec<u8>>,
+        ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error> {
+            self.sent.borrow_mut().push(command.serialize());
+            let (mut data, status) = (self.handler.borrow_mut())(command);
+            data.extend_from_slice(&status.to_be_bytes());
+            Ok(ledger_apdu::APDUAnswer::from_answer(data).unwrap())
+        }
     }
 }
 

@@ -16,15 +16,18 @@ pub mod device;
 pub mod error;
 pub mod firmware;
 mod hid;
+pub mod language;
+pub mod lock_screen;
 pub mod model;
+pub mod restore;
 pub mod socket;
 pub mod version;
 
 pub use api::{
-    bitcoin_apps_by_hashes, current_firmware, fetch_mcus, get_current_firmware, get_current_osu,
-    get_device_version, get_final_firmware_by_id, get_latest_firmware, latest_firmware,
-    BitcoinAppInfo, DeviceVersion, FinalFirmware, FirmwareInfo, FirmwareUpdateInfo, McuVersion,
-    OsuFirmware,
+    apps_catalog, bitcoin_apps_by_hashes, current_firmware, fetch_mcus, get_current_firmware,
+    get_current_osu, get_device_version, get_final_firmware_by_id, get_latest_firmware,
+    latest_firmware, AppInfo, BitcoinAppInfo, DeviceVersion, FinalFirmware, FirmwareInfo,
+    FirmwareUpdateInfo, McuVersion, OsuFirmware,
 };
 pub use apps::{
     bitcoin_app_installed, bitcoin_app_name, bitcoin_latest_app, genuine_check,
@@ -45,7 +48,20 @@ pub use firmware::{
     repair_firmware_with_options, update_firmware, update_firmware_with_options,
     FirmwareUpdateOptions, FirmwareUpdateStep,
 };
-pub use model::{DeviceModel, LEDGER_USB_VENDOR_ID};
+pub use language::{
+    install_language, language_display_name, language_id, language_name,
+    language_packages_for_device, LanguageInstallStep, LanguagePackage, ENGLISH_LANGUAGE_ID,
+    LANGUAGES,
+};
+pub use lock_screen::{fetch_image, load_image, FetchedImage, LoadImageStep};
+pub use model::{DeviceModel, ScreenSpecs, LEDGER_USB_VENDOR_ID};
+pub use restore::{
+    backup_device_settings, backup_file_name, default_backup_dir, find_latest_backup, load_backup,
+    restore_device_settings, save_backup, update_firmware_and_restore, AppRestoreOutcome,
+    BackedUpApp, BackupLocation, BackupStep, DeviceBackup, LockScreenBackup, RestoreOutcome,
+    RestoreReport, RestoreStep, UpdateAndRestoreOptions, UpdateAndRestoreResult,
+    UpdateAndRestoreStep,
+};
 pub use socket::{query_via_websocket, run_device_socket, SocketEvent};
 
 /// The Ledger Live API requires request to set their claimed version of Ledger Live. This is the

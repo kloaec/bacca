@@ -158,8 +158,8 @@ pub fn firmware_update_will_uninstall_apps(_device_info: &DeviceInfo) -> bool {
     true
 }
 
-/// Whether the device will lose its custom lock screen and language settings during the update.
-/// Ledger Live backs them up and restores them for these devices; we don't.
+/// Whether the device may lose its custom lock screen and language settings during the update.
+/// Like Ledger Live, `restore::update_firmware_and_restore` backs them up and restores them.
 /// https://github.com/LedgerHQ/ledger-live/blob/develop/apps/ledger-live-desktop/src/renderer/modals/UpdateFirmwareModal/helpers/createFirmwareUpdateSteps.ts
 pub fn firmware_update_resets_customization(
     device_info: &DeviceInfo,
@@ -483,8 +483,9 @@ fn install_final_firmware<P: FnMut(FirmwareUpdateStep)>(
 /// open.
 ///
 /// WARNING: the applications installed on the device are removed by the update, and they need to
-/// be reinstalled afterwards. On Stax, Flex and Nano Gen5, the custom lock screen is not backed
-/// up and restored (Ledger Live does), and the language may have to be set again on the device.
+/// be reinstalled afterwards. The language and (on Stax, Flex and Nano Gen5) the custom lock
+/// screen picture may be reset. This function doesn't back them up and restore them, use
+/// `restore::update_firmware_and_restore` for that.
 pub fn update_firmware<P: FnMut(FirmwareUpdateStep)>(
     hid_api: &mut HidApi,
     update: &FirmwareUpdateInfo,

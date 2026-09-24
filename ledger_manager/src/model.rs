@@ -236,6 +236,47 @@ impl DeviceModel {
         )
     }
 
+    /// Whether this model supports a custom lock screen picture.
+    /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/capabilities/isCustomLockScreenSupported.ts
+    pub fn is_custom_lock_screen_supported(&self) -> bool {
+        self.screen_specs().is_some()
+    }
+
+    /// The specifications of the screen, for the models supporting a custom lock screen picture.
+    /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/customLockScreen/screenSpecs.ts
+    pub fn screen_specs(&self) -> Option<ScreenSpecs> {
+        match self {
+            DeviceModel::Stax => Some(ScreenSpecs {
+                width: 400,
+                height: 672,
+                padding_top: 0,
+                padding_bottom: 2,
+                padding_left: 0,
+                padding_right: 0,
+                bits_per_pixel: 4,
+            }),
+            DeviceModel::Flex => Some(ScreenSpecs {
+                width: 480,
+                height: 600,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_left: 0,
+                padding_right: 0,
+                bits_per_pixel: 4,
+            }),
+            DeviceModel::NanoGen5 => Some(ScreenSpecs {
+                width: 300,
+                height: 400,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_left: 0,
+                padding_right: 0,
+                bits_per_pixel: 1,
+            }),
+            _ => None,
+        }
+    }
+
     /// Minimum firmware version from which Ledger Live supports updating the firmware of this
     /// model through USB.
     /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/isFirmwareUpdateVersionSupported.ts
@@ -248,6 +289,43 @@ impl DeviceModel {
             DeviceModel::Stax => Some((1, 0, 0)),
             DeviceModel::Flex | DeviceModel::NanoGen5 => Some((0, 0, 0)),
         }
+    }
+}
+
+/// The specifications of the screen of a device supporting a custom lock screen picture.
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/customLockScreen/screenSpecs.ts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenSpecs {
+    /// Width of the screen, in pixels.
+    pub width: u16,
+    /// Height of the screen, in pixels.
+    pub height: u16,
+    /// Number of pixels at the top of the screen which are not visible.
+    pub padding_top: u16,
+    /// Number of pixels at the bottom of the screen which are not visible.
+    pub padding_bottom: u16,
+    /// Number of pixels at the left of the screen which are not visible.
+    pub padding_left: u16,
+    /// Number of pixels at the right of the screen which are not visible.
+    pub padding_right: u16,
+    /// Number of bits per pixel (1 or 4).
+    pub bits_per_pixel: u8,
+}
+
+impl ScreenSpecs {
+    /// The "bpp" indicator of the image format for this number of bits per pixel
+    /// (`bitsPerPixelToBppIndicator` in ledger-live's hw/customLockScreenLoad.ts).
+    pub fn bpp_indicator(&self) -> u8 {
+        match self.bits_per_pixel {
+            1 => 0,
+            _ => 2,
+        }
+    }
+
+    /// The size in bytes of the uncompressed picture data (all the pixels of the screen,
+    /// including the padding).
+    pub fn raw_data_size(&self) -> usize {
+        (self.width as usize * self.height as usize * self.bits_per_pixel as usize).div_ceil(8)
     }
 }
 
@@ -350,5 +428,26 @@ mod tests {
         assert_eq!(DeviceModel::NanoS.block_size("1.6.1"), 4096);
         assert_eq!(DeviceModel::NanoS.block_size("2.1.0"), 2048);
         assert_eq!(DeviceModel::Stax.block_size("1.0.0"), 512);
+    }
+
+    #[test]
+    fn screen_specs() {
+        for model in DeviceModel::ALL {
+            assert_eq!(
+                model.is_custom_lock_screen_supported(),
+                model.has_touch_screen()
+            );
+        }
+        let stax = DeviceModel::Stax.screen_specs().unwrap();
+        assert_eq!(
+            (stax.width, stax.height, stax.padding_bottom),
+            (400, 672, 2)
+        );
+        assert_eq!(stax.bpp_indicator(), 2);
+        assert_eq!(stax.raw_data_size(), 400 * 672 / 2);
+        let gen5 = DeviceModel::NanoGen5.screen_specs().unwrap();
+        assert_eq!(gen5.bpp_indicator(), 0);
+        assert_eq!(gen5.raw_data_size(), 300 * 400 / 8);
+        assert!(DeviceModel::NanoX.screen_specs().is_none());
     }
 }

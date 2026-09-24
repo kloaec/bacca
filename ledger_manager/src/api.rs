@@ -71,6 +71,14 @@ fn get_json_firmware<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
     }
 }
 
+/// GET a text document (e.g. the APDUs of a language pack).
+pub(crate) fn get_text(url: &str) -> Result<String, Error> {
+    log::debug!("GET {}", url);
+    let resp = minreq::get(url).send()?;
+    check_status(&resp, url)?;
+    resp.as_str().map(|s| s.to_string()).map_err(Error::Http)
+}
+
 pub(crate) fn post_json<T: DeserializeOwned>(
     url: &str,
     body: &serde_json::Value,
@@ -84,7 +92,7 @@ pub(crate) fn post_json<T: DeserializeOwned>(
 /// Deserialize a field which may be missing or explicitly `null` as its default value. The Ledger
 /// API is not consistent about it and Ledger Live treats most of these fields as nullable (e.g.
 /// `mcuVersion.from_bootloader_version ?? ""` in hw/flash.ts). Use along with `#[serde(default)]`.
-fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+pub(crate) fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Default + serde::Deserialize<'de>,
@@ -500,12 +508,15 @@ pub fn bitcoin_apps_by_hashes(hashes: Vec<Vec<u8>>) -> Result<Vec<Option<Bitcoin
         .collect())
 }
 
-/// Get the catalog of applications available for this device. Only Bitcoin applications are
-/// kept, others are discarded (and not even parsed).
+/// Information about any application of the catalog. `BitcoinAppInfo` is not specific to the
+/// Bitcoin apps, this is the same type.
+pub type AppInfo = BitcoinAppInfo;
+
+/// Fetch the raw catalog of applications available for this device.
 // This uses the v2 API. See for reference:
 // - https://github.com/LedgerHQ/ledger-live/blob/5a0a1aa5dc183116839851b79bceb6704f1de4b9/libs/ledger-live-common/src/apps/listApps/v2.ts
 // - https://github.com/LedgerHQ/ledger-live/blob/5a0a1aa5dc183116839851b79bceb6704f1de4b9/libs/device-core/src/managerApi/repositories/HttpManagerApiRepository.ts#L211
-pub(crate) fn bitcoin_apps_catalog(device_info: &DeviceInfo) -> Result<Vec<BitcoinAppInfo>, Error> {
+fn fetch_catalog(device_info: &DeviceInfo) -> Result<Vec<serde_json::Value>, Error> {
     let url = url_with_params(
         &format!("{}/apps/by-target", BASE_API_V2_URL),
         &[
@@ -514,8 +525,33 @@ pub(crate) fn bitcoin_apps_catalog(device_info: &DeviceInfo) -> Result<Vec<Bitco
             ("firmware_version_name", &device_info.version),
         ],
     );
-    let apps: Vec<serde_json::Value> = get_json(&url)?;
-    Ok(apps
+    get_json(&url)
+}
+
+/// Parse the entries of the catalog, skipping (with a warning) the ones which can't be parsed.
+pub(crate) fn parse_catalog(entries: Vec<serde_json::Value>) -> Vec<AppInfo> {
+    entries
+        .into_iter()
+        .filter_map(|a| match serde_json::from_value::<AppInfo>(a) {
+            Ok(app) => Some(app),
+            Err(e) => {
+                log::warn!("Could not parse app from catalog: {}", e);
+                None
+            }
+        })
+        .collect()
+}
+
+/// Get the catalog of all the applications available for this device (for its current firmware).
+pub fn apps_catalog(device_info: &DeviceInfo) -> Result<Vec<AppInfo>, Error> {
+    device_info.check_normal_mode()?;
+    Ok(parse_catalog(fetch_catalog(device_info)?))
+}
+
+/// Get the catalog of applications available for this device. Only Bitcoin applications are
+/// kept, others are discarded (and not even parsed).
+pub(crate) fn bitcoin_apps_catalog(device_info: &DeviceInfo) -> Result<Vec<BitcoinAppInfo>, Error> {
+    let apps = fetch_catalog(device_info)?
         .into_iter()
         .filter(|a| {
             a.get("versionName")
@@ -523,14 +559,8 @@ pub(crate) fn bitcoin_apps_catalog(device_info: &DeviceInfo) -> Result<Vec<Bitco
                 .map(crate::apps::is_bitcoin_app_name)
                 .unwrap_or(false)
         })
-        .filter_map(|a| match serde_json::from_value::<BitcoinAppInfo>(a) {
-            Ok(app) => Some(app),
-            Err(e) => {
-                log::warn!("Could not parse Bitcoin app from catalog: {}", e);
-                None
-            }
-        })
-        .collect())
+        .collect();
+    Ok(parse_catalog(apps))
 }
 
 #[cfg(test)]

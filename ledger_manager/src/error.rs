@@ -143,6 +143,22 @@ pub enum Error {
     Timeout(&'static str),
     /// IO error.
     Io(io::Error),
+    /// The device is in recovery mode.
+    DeviceInRecoveryMode,
+    /// No language pack for this language is available for the firmware of the device.
+    LanguageNotFound(String),
+    /// The user refused the installation of the language pack on the device.
+    LanguageInstallRefusedOnDevice,
+    /// The user refused to load the lock screen picture on the device.
+    ImageLoadRefusedOnDevice,
+    /// The user refused to confirm the new lock screen picture on the device.
+    ImageCommitRefusedOnDevice,
+    /// The lock screen picture is not in the expected format for this device.
+    InvalidImage(String),
+    /// The backup of the device settings is invalid or was made for another device.
+    InvalidBackup(String),
+    /// The backup of the device settings could not be saved to a file.
+    BackupNotSaved(String),
 }
 
 impl fmt::Display for Error {
@@ -222,6 +238,29 @@ impl fmt::Display for Error {
             ),
             Error::Timeout(s) => write!(f, "Timed out {}", s),
             Error::Io(e) => write!(f, "IO error: {}", e),
+            Error::DeviceInRecoveryMode => write!(f, "Device is in recovery mode."),
+            Error::LanguageNotFound(l) => write!(
+                f,
+                "No '{}' language pack is available for the firmware of the device.",
+                l
+            ),
+            Error::LanguageInstallRefusedOnDevice => {
+                write!(f, "The language installation was refused on the device.")
+            }
+            Error::ImageLoadRefusedOnDevice => {
+                write!(f, "Loading the lock screen picture was refused on the device.")
+            }
+            Error::ImageCommitRefusedOnDevice => write!(
+                f,
+                "The new lock screen picture was not confirmed on the device."
+            ),
+            Error::InvalidImage(s) => write!(f, "Invalid lock screen picture: {}", s),
+            Error::InvalidBackup(s) => write!(f, "Invalid backup: {}", s),
+            Error::BackupNotSaved(s) => write!(
+                f,
+                "Could not save the backup of the device settings: {}",
+                s
+            ),
         }
     }
 }

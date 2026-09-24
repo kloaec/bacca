@@ -99,3 +99,46 @@ fn live_mcus() {
     let mcus = ledger_manager::fetch_mcus().unwrap();
     assert!(mcus.len() > 100, "{} MCU versions", mcus.len());
 }
+
+#[test]
+#[ignore]
+fn live_language_packs() {
+    for (model, info) in devices() {
+        let packs = ledger_manager::language_packages_for_device(&info).unwrap();
+        let supported =
+            ledger_manager::device::is_device_localization_supported(&info.version, Some(model));
+        let languages: Vec<&str> = packs.iter().map(|p| p.language.as_str()).collect();
+        println!("{model} {}: {:?}", info.version, languages);
+        if supported {
+            // Not all the languages are available for all the firmwares (at the time of writing
+            // there is no French pack for the Nano S Plus 1.5.0).
+            assert!(languages.len() > 2, "{model}: language packs");
+            assert!(packs
+                .iter()
+                .all(|p| p.apdu_install_url.starts_with("https://")));
+        } else {
+            assert!(packs.is_empty(), "{model}: no language pack");
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn live_apps_catalog() {
+    for (model, info) in devices() {
+        let catalog = ledger_manager::apps_catalog(&info).unwrap();
+        assert!(catalog.len() > 20, "{model}: {} apps", catalog.len());
+        assert!(catalog.iter().any(|a| a.version_name == "Bitcoin"));
+        // The dependencies are in the catalog.
+        for app in &catalog {
+            if let Some(parent) = app.parent_name.as_deref().filter(|p| !p.is_empty()) {
+                assert!(
+                    catalog.iter().any(|a| a.version_name == parent),
+                    "{model}: {} depends on {parent}",
+                    app.version_name
+                );
+            }
+        }
+        println!("{model}: {} apps in the catalog", catalog.len());
+    }
+}

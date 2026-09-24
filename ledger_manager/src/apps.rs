@@ -53,7 +53,7 @@ const APP_INSTALL_RETRY_LIMIT: usize = 5;
 /// Ledger Live waits a bit between two app operations, as older firmwares misbehave when actions
 /// are performed too closely (`MANAGER_INSTALL_DELAY`, 1s by default).
 /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/apps/runner.ts
-const MANAGER_INSTALL_DELAY: time::Duration = time::Duration::from_millis(1000);
+pub(crate) const MANAGER_INSTALL_DELAY: time::Duration = time::Duration::from_millis(1000);
 
 /// The name of the Bitcoin app to use.
 pub fn bitcoin_app_name(is_testnet: bool) -> &'static str {
