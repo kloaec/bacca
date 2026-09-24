@@ -39,6 +39,8 @@ pub enum Message {
     RepairFirmware,
     ConfirmFirmwareUpdate,
     CancelFirmwareUpdate,
+    /// Update the firmware without saving the backup of the device settings to a file.
+    UpdateFirmwareWithoutBackupFile,
 
     ResetAlarm,
     Result,
@@ -61,6 +63,9 @@ pub struct Bacca {
     info: Option<String>,
     /// Whether the firmware update confirmation is displayed.
     confirm_firmware_update: bool,
+    /// Why the backup of the Ledger settings could not be saved (the firmware update was not
+    /// started), displayed with the choice to retry or to update without a backup file.
+    backup_error: Option<String>,
     device_busy: bool,
     alarm: bool,
 }
@@ -95,6 +100,7 @@ impl Application for Bacca {
             progress: None,
             info: None,
             confirm_firmware_update: false,
+            backup_error: None,
             device_busy: false,
             alarm: false,
         };
@@ -114,6 +120,7 @@ impl Application for Bacca {
                 DeviceMessage::State(state) => {
                     if matches!(state, DeviceState::None) {
                         self.confirm_firmware_update = false;
+                        self.backup_error = None;
                     }
                     self.device = state;
                 }
@@ -125,6 +132,7 @@ impl Application for Bacca {
                 DeviceMessage::Progress(p) => self.progress = p,
                 DeviceMessage::Info(i) => self.info = i,
                 DeviceMessage::Busy(busy) => self.device_busy = busy,
+                DeviceMessage::BackupNotSaved(e) => self.backup_error = Some(e),
                 msg => {
                     log::debug!(
                         "Bacca.update() => Unhandled message from device service: {:?}!",
@@ -147,10 +155,19 @@ impl Application for Bacca {
                 }
             }
             Message::RepairFirmware => self.operation(DeviceMessage::RepairFirmware),
-            Message::CancelFirmwareUpdate => self.confirm_firmware_update = false,
+            Message::CancelFirmwareUpdate => {
+                self.confirm_firmware_update = false;
+                self.backup_error = None;
+            }
             Message::ConfirmFirmwareUpdate => {
                 self.confirm_firmware_update = false;
+                self.backup_error = None;
                 self.operation(DeviceMessage::UpdateFirmware);
+            }
+            Message::UpdateFirmwareWithoutBackupFile => {
+                self.confirm_firmware_update = false;
+                self.backup_error = None;
+                self.operation(DeviceMessage::UpdateFirmwareWithoutBackupFile);
             }
             Message::Result => {}
         }
@@ -158,7 +175,9 @@ impl Application for Bacca {
     }
 
     fn view(&self) -> Element<'_, Message, Theme> {
-        let content = if self.confirm_firmware_update {
+        let content = if self.backup_error.is_some() {
+            self.backup_error_view()
+        } else if self.confirm_firmware_update {
             self.confirmation_view()
         } else if self.alarm {
             self.alarm_view()
@@ -268,13 +287,21 @@ impl Bacca {
                 target = Some(v.clone());
             }
             lines.push(
-                "- All the apps installed on your Ledger will be uninstalled. You will have to reinstall the Bitcoin app afterwards (your funds are not affected).".to_string(),
+                "- All the apps installed on your Ledger will be uninstalled by the update (your funds are not affected). The list of installed apps is backed up before the update, and the apps are reinstalled automatically afterwards.".to_string(),
             );
             if ledger.update_resets_customization {
                 lines.push(
-                    "- The language and the custom lock screen of your device may be reset."
-                        .to_string(),
+                    "- The language and the custom lock screen picture of your device are backed up and restored automatically after the update. You will have to approve their backup and restoration on the device.".to_string(),
                 );
+            }
+            lines.push(
+                "- The data stored inside the apps is NOT restored. In particular the wallet policies registered in the Bitcoin app (and its settings) are lost: you may have to register your wallet again from your wallet software.".to_string(),
+            );
+            if let Some(dir) = ledger_manager::default_backup_dir() {
+                lines.push(format!(
+                    "- The backup is saved in {} before the update starts, so it is not lost if the update gets interrupted.",
+                    dir.display()
+                ));
             }
             lines.push(
                 "- Keep the device plugged in and unlocked during the whole update. It can take several minutes, the device may restart several times.".to_string(),
@@ -327,6 +354,44 @@ impl Bacca {
                     .push(Button::new(" Cancel ").on_press(Message::CancelFirmwareUpdate))
                     .push(Space::with_width(30))
                     .push(Button::new(" Update firmware ").on_press(Message::ConfirmFirmwareUpdate))
+                    .push(Space::with_width(Length::Fill)),
+            )
+    }
+}
+
+impl Bacca {
+    fn backup_error_view(&self) -> Column<'_, Message, Theme> {
+        let error = self.backup_error.clone().unwrap_or_default();
+        let text = Column::new()
+            .spacing(8)
+            .push(Text::new(format!(
+                "The backup of your device settings could not be saved: {}",
+                error
+            )))
+            .push(Text::new(
+                "The firmware update was not started. You can retry, or update anyway: the settings are then backed up in memory only, and they are lost if the update gets interrupted.",
+            ));
+        Column::new()
+            .push(section_title("Backup failed"))
+            .push(Space::with_height(10))
+            .push(
+                Container::new(text)
+                    .style(theme::Container::Frame)
+                    .padding(15)
+                    .width(Length::Fill),
+            )
+            .push(Space::with_height(15))
+            .push(
+                Row::new()
+                    .push(Space::with_width(Length::Fill))
+                    .push(Button::new(" Cancel ").on_press(Message::CancelFirmwareUpdate))
+                    .push(Space::with_width(30))
+                    .push(Button::new(" Retry ").on_press(Message::ConfirmFirmwareUpdate))
+                    .push(Space::with_width(30))
+                    .push(
+                        Button::new(" Update without backup file ")
+                            .on_press(Message::UpdateFirmwareWithoutBackupFile),
+                    )
                     .push(Space::with_width(Length::Fill)),
             )
     }

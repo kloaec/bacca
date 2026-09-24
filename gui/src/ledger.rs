@@ -6,13 +6,18 @@ use crate::device_service::{
 };
 
 use ledger_manager::{
-    bitcoin_apps_by_hashes, check_firmware_update_supported, firmware_update_resets_customization,
-    genuine_check_with_events, get_latest_apps, install_bitcoin_app_with_progress, latest_firmware,
+    bitcoin_apps_by_hashes, check_firmware_update_supported, default_backup_dir,
+    firmware_update_resets_customization, genuine_check_with_events, get_latest_apps,
+    install_bitcoin_app_with_progress, latest_firmware,
     ledger_transport_hidapi::{hidapi::HidApi, TransportNativeHID},
-    list_installed_apps_raw, open_device, update_bitcoin_app_with_progress, AppInstallStep,
-    DeviceInfo, DeviceModel, Error, FirmwareUpdateInfo, FirmwareUpdateStep, SocketEvent,
+    list_installed_apps_raw, open_device, update_bitcoin_app_with_progress,
+    update_firmware_and_restore, AppInstallStep, BackupStep, DeviceInfo, DeviceModel, Error,
+    FirmwareUpdateInfo, FirmwareUpdateStep, LanguageInstallStep, LoadImageStep, RestoreStep,
+    SocketEvent, UpdateAndRestoreOptions, UpdateAndRestoreResult, UpdateAndRestoreStep,
     BITCOIN_APP_NAME, BITCOIN_TEST_APP_NAME,
 };
+
+use std::path::PathBuf;
 
 fn connect(reporter: &Reporter) -> Option<(TransportNativeHID, Option<DeviceModel>)> {
     let res = HidApi::new()
@@ -390,23 +395,204 @@ fn report_firmware_step(reporter: &Reporter, step: FirmwareUpdateStep) {
     }
 }
 
-/// Update the firmware. This takes minutes, the device restarts several times.
-pub fn update_firmware(reporter: &Reporter, update: FirmwareUpdateInfo) -> TaskResult {
-    log::info!("ledger::update_firmware({})", update.version());
-    let message = match HidApi::new() {
-        Err(e) => (format!("Error initializing HID api: {}.", e), true),
-        Ok(mut api) => match ledger_manager::update_firmware(&mut api, &update, |step| {
-            report_firmware_step(reporter, step)
-        }) {
-            Ok(info) => (
-                format!(
-                    "Successfully updated the firmware to {}. The apps were removed by the update: click 'Install' to reinstall the Bitcoin app.",
-                    info.version
-                ),
-                false,
-            ),
-            Err(e) => (format!("Error updating the firmware: {}", e), true),
-        },
+fn report_backup_step(reporter: &Reporter, step: BackupStep) {
+    match step {
+        BackupStep::ListingApps => reporter.status(
+            "Backing up the list of installed apps. Please allow the Ledger manager on your device if it asks for it.",
+        ),
+        BackupStep::QueryingApi => reporter.status("Backing up the list of installed apps..."),
+        BackupStep::FetchingLockScreen => {
+            reporter.progress(None);
+            reporter.status(
+                "Backing up the lock screen picture. Please approve the backup on your device if it asks for it.",
+            )
+        }
+        BackupStep::FetchingLockScreenProgress { progress } => {
+            reporter.status(format!(
+                "Backing up the lock screen picture: {}%",
+                percent(progress)
+            ));
+            reporter.progress(Some(progress));
+        }
+        BackupStep::Done => reporter.progress(None),
+    }
+}
+
+fn report_restore_step(reporter: &Reporter, step: RestoreStep) {
+    match step {
+        RestoreStep::InstallingLanguage { language } => {
+            reporter.progress(None);
+            reporter.status(format!(
+                "Restoring the language of your device ({})...",
+                language
+            ))
+        }
+        RestoreStep::Language(LanguageInstallStep::Downloading) => {
+            reporter.status("Downloading the language pack...")
+        }
+        RestoreStep::Language(LanguageInstallStep::PermissionRequested) => {
+            reporter.status("Please approve the language installation on your device.")
+        }
+        RestoreStep::Language(LanguageInstallStep::Installing { progress }) => {
+            reporter.status(format!("Installing the language: {}%", percent(progress)));
+            reporter.progress(Some(progress));
+        }
+        RestoreStep::RestoringLockScreen => {
+            reporter.progress(None);
+            reporter.status("Restoring the lock screen picture...")
+        }
+        RestoreStep::LockScreen(LoadImageStep::LoadPermissionRequested) => reporter
+            .status("Please approve the restoration of the lock screen picture on your device."),
+        RestoreStep::LockScreen(LoadImageStep::Loading { progress }) => {
+            reporter.status(format!(
+                "Restoring the lock screen picture: {}%",
+                percent(progress)
+            ));
+            reporter.progress(Some(progress));
+        }
+        RestoreStep::LockScreen(LoadImageStep::CommitPermissionRequested) => {
+            reporter.progress(None);
+            reporter.status("Please confirm the lock screen picture on your device.")
+        }
+        RestoreStep::ListingApps => {
+            reporter.progress(None);
+            reporter.status(
+                "Reinstalling the apps. Please allow the Ledger manager on your device if it asks for it.",
+            )
+        }
+        RestoreStep::InstallingApp { name, index, total } => {
+            reporter.progress(None);
+            reporter.status(format!("Reinstalling {} ({}/{})...", name, index, total))
+        }
+        RestoreStep::App(AppInstallStep::Installing { progress, .. }) => {
+            reporter.progress(Some(progress));
+        }
+        RestoreStep::App(step) => report_app_step(reporter, step),
+        RestoreStep::Done { .. } => reporter.progress(None),
+    }
+}
+
+fn report_update_step(reporter: &Reporter, step: UpdateAndRestoreStep) {
+    match step {
+        UpdateAndRestoreStep::Backup(step) => report_backup_step(reporter, step),
+        UpdateAndRestoreStep::BackupSaved { path } => reporter.status(format!(
+            "Backup of the device settings saved to {}.",
+            path.display()
+        )),
+        UpdateAndRestoreStep::BackupLoaded { path } => reporter.status(format!(
+            "Resuming the interrupted update. The settings will be restored from {}.",
+            path.display()
+        )),
+        UpdateAndRestoreStep::BackupSkipped { reason } => {
+            log::warn!("The device settings were not backed up: {}", reason)
+        }
+        UpdateAndRestoreStep::Firmware(step) => report_firmware_step(reporter, step),
+        UpdateAndRestoreStep::Restore(step) => report_restore_step(reporter, step),
+    }
+}
+
+/// The message to display at the end of the update, and whether it is an alarm (something could
+/// not be restored).
+fn update_result_message(
+    result: &UpdateAndRestoreResult,
+    backup_path: &Option<PathBuf>,
+) -> (String, bool) {
+    let mut lines = vec![format!(
+        "Successfully updated the firmware to {}.",
+        result.device_info.version
+    )];
+    let mut alarm = false;
+    let mut bitcoin_reinstalled = false;
+    match (&result.report, &result.restore_error) {
+        (Some(report), _) => {
+            lines.push("Restoration of the device settings:".to_string());
+            lines.extend(report.lines().into_iter().map(|l| format!("- {}", l)));
+            bitcoin_reinstalled = report
+                .reinstalled_apps()
+                .iter()
+                .any(|a| *a == BITCOIN_APP_NAME || *a == BITCOIN_TEST_APP_NAME);
+            if !report.is_complete() {
+                alarm = true;
+            }
+        }
+        (None, Some(e)) => {
+            alarm = true;
+            lines.push(format!("The device settings could not be restored: {}", e));
+            if let Some(path) = backup_path {
+                lines.push(format!(
+                    "The backup is saved in {}, it can be restored with the CLI (restorebackup command).",
+                    path.display()
+                ));
+            }
+        }
+        (None, None) => lines.push(
+            "The device settings were not backed up, so they could not be restored.".to_string(),
+        ),
+    }
+    if bitcoin_reinstalled {
+        lines.push(
+            "The wallet policies registered in the Bitcoin app are not restored: you may have to register your wallet again from your wallet software.".to_string(),
+        );
+    } else {
+        lines.push("Click 'Install' to install the Bitcoin app if you need it.".to_string());
+    }
+    (lines.join("\n"), alarm)
+}
+
+/// Update the firmware, backing up the device settings before and restoring them after. This
+/// takes minutes, the device restarts several times. If `save_backup` is set, the backup is saved
+/// to a file before starting the update, and the update is not started if it can't be saved.
+pub fn update_firmware(
+    reporter: &Reporter,
+    update: FirmwareUpdateInfo,
+    save_backup: bool,
+) -> TaskResult {
+    log::info!(
+        "ledger::update_firmware({}, save_backup={})",
+        update.version(),
+        save_backup
+    );
+    let options = if save_backup {
+        match default_backup_dir() {
+            Some(dir) => UpdateAndRestoreOptions::new(dir),
+            None => {
+                return TaskResult::BackupNotSaved(
+                    "Could not determine the configuration directory to save the backup of the device settings.".to_string(),
+                )
+            }
+        }
+    } else {
+        UpdateAndRestoreOptions::memory_only()
+    };
+    let mut api = match HidApi::new() {
+        Ok(api) => api,
+        Err(e) => {
+            return TaskResult::Operation {
+                reload: true,
+                message: Some((format!("Error initializing HID api: {}.", e), true)),
+            }
+        }
+    };
+    let mut backup_path = None;
+    let res = update_firmware_and_restore(&mut api, &update, &options, |step| {
+        if let UpdateAndRestoreStep::BackupSaved { path }
+        | UpdateAndRestoreStep::BackupLoaded { path } = &step
+        {
+            backup_path = Some(path.clone());
+        }
+        report_update_step(reporter, step)
+    });
+    let message = match res {
+        Ok(result) => update_result_message(&result, &backup_path),
+        Err(Error::BackupNotSaved(e)) => return TaskResult::BackupNotSaved(e),
+        Err(e) => {
+            let hint = if backup_path.is_some() {
+                " The backup of the device settings is saved: complete the update ('Update' or 'Repair'), the settings are restored after it. If the device then runs the new firmware without having restored them, use the restorebackup command of the CLI."
+            } else {
+                ""
+            };
+            (format!("Error updating the firmware: {}.{}", e, hint), true)
+        }
     };
     TaskResult::Operation {
         reload: true,

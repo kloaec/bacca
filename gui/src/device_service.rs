@@ -165,6 +165,9 @@ pub enum TaskResult {
         reload: bool,
         message: Option<(String, bool)>,
     },
+    /// The backup of the device settings could not be saved to a file: the firmware update was
+    /// not started.
+    BackupNotSaved(String),
     /// The task panicked.
     Failed,
 }
@@ -180,6 +183,9 @@ pub enum DeviceMessage {
     },
     GenuineCheck,
     UpdateFirmware,
+    /// Update the firmware of a Ledger without saving the backup of its settings to a file (it is
+    /// only kept in memory).
+    UpdateFirmwareWithoutBackupFile,
     /// Resume a Ledger firmware update interrupted while the device was in bootloader mode.
     RepairFirmware,
 
@@ -194,6 +200,8 @@ pub enum DeviceMessage {
     Info(Option<String>),
     /// Whether an operation is running (the GUI must not allow to start another one).
     Busy(bool),
+    /// The backup of the Ledger settings could not be saved, the firmware update was not started.
+    BackupNotSaved(String),
 
     // Internal.
     Poll,
@@ -395,6 +403,7 @@ impl DeviceService {
             | DeviceMessage::UpdateApp { .. }
             | DeviceMessage::GenuineCheck
             | DeviceMessage::UpdateFirmware
+            | DeviceMessage::UpdateFirmwareWithoutBackupFile
             | DeviceMessage::RepairFirmware) => {
                 if self.busy {
                     // Another operation is running (the GUI should not have allowed it).
@@ -487,6 +496,13 @@ impl DeviceService {
                     }
                 }
             }
+            TaskResult::BackupNotSaved(e) => {
+                self.set_busy(false);
+                self.send_to_gui(DeviceMessage::Progress(None));
+                self.send_to_gui(DeviceMessage::Info(None));
+                self.send_to_gui(DeviceMessage::Status(String::new(), false));
+                self.send_to_gui(DeviceMessage::BackupNotSaved(e));
+            }
             TaskResult::Failed => {
                 self.loaded = None;
                 self.set_busy(false);
@@ -531,18 +547,23 @@ impl DeviceService {
             DeviceMessage::GenuineCheck => {
                 self.spawn_task(move |r| TaskResult::Genuine(ledger::genuine_check(&r)))
             }
-            DeviceMessage::UpdateFirmware => match self.ledger_update.clone() {
-                Some(update) if matches!(ledger.latest_firmware, LatestFirmware::Available(_)) => {
-                    self.spawn_task(move |r| ledger::update_firmware(&r, *update))
+            DeviceMessage::UpdateFirmware | DeviceMessage::UpdateFirmwareWithoutBackupFile => {
+                match self.ledger_update.clone() {
+                    Some(update)
+                        if matches!(ledger.latest_firmware, LatestFirmware::Available(_)) =>
+                    {
+                        let save_backup = matches!(op, DeviceMessage::UpdateFirmware);
+                        self.spawn_task(move |r| ledger::update_firmware(&r, *update, save_backup))
+                    }
+                    _ => {
+                        self.set_busy(false);
+                        self.send_to_gui(DeviceMessage::Status(
+                            "No firmware update available for this device.".to_string(),
+                            true,
+                        ));
+                    }
                 }
-                _ => {
-                    self.set_busy(false);
-                    self.send_to_gui(DeviceMessage::Status(
-                        "No firmware update available for this device.".to_string(),
-                        true,
-                    ));
-                }
-            },
+            }
             DeviceMessage::RepairFirmware if ledger.mode == LedgerMode::Bootloader => {
                 self.spawn_task(|r| ledger::repair_firmware(&r))
             }
