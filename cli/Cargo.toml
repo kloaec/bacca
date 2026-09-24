@@ -10,4 +10,5 @@ readme.workspace = true
 [dependencies]
 ledger_manager = { path = "../ledger_manager", version = "0.1.0" }
 bitbox_manager = { path = "../bitbox_manager", version = "0.1.0" }
+jade_manager = { path = "../jade_manager", version = "0.1.0" }
 hex = "0.4"

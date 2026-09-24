@@ -1,6 +1,6 @@
 //! The command line interface. The command is passed through the `LEDGER_COMMAND` environment
-//! variable for a Ledger, `BITBOX_COMMAND` for a BitBox02. See the README for the commands and the
-//! options.
+//! variable for a Ledger, `BITBOX_COMMAND` for a BitBox02, `JADE_COMMAND` for a Jade. See the
+//! README for the commands and the options.
 
 use std::{
     env,
@@ -30,6 +30,7 @@ macro_rules! fail {
 }
 
 mod bitbox;
+mod jade;
 
 /// Exit with an error message on error.
 trait OrExit<T> {
@@ -45,6 +46,9 @@ impl<T, E: Display> OrExit<T> for Result<T, E> {
 fn main() {
     if let Ok(command) = env::var("BITBOX_COMMAND") {
         return bitbox::run(&command);
+    }
+    if let Ok(command) = env::var("JADE_COMMAND") {
+        return jade::run(&command);
     }
     let command = env::var("LEDGER_COMMAND").unwrap_or_default();
     let testnet = env::var_os("LEDGER_TESTNET").is_some();

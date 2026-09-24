@@ -1975,6 +1975,7 @@ version = "0.1.0"
 dependencies = [
  "bitbox_manager",
  "hex",
+ "jade_manager",
  "ledger_manager",
 ]
 
