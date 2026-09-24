@@ -1,0 +1,344 @@
+{
+  "beta": {},
+  "stable": {
+    "full": [
+      {
+        "filename": "1.0.41_noradio_1183744_fw.bin",
+        "version": "1.0.41",
+        "config": "noradio",
+        "fwsize": 1183744,
+        "cmphash": "f7436faa25ef70235fa282377fdce010202c96c954fba4c4a186aacd8e9013d7",
+        "fwhash": "b0b6c3a0cb1526b71ab24c73103e80a973efde2fb0dace8cf37dd97e762e9761"
+      },
+      {
+        "filename": "1.0.41_ble_1445888_fw.bin",
+        "version": "1.0.41",
+        "config": "ble",
+        "fwsize": 1445888,
+        "cmphash": "323cb6b17671d153ece20af8f6a3ddce7142e4bcc6cf2577b9ab7c2a14d55660",
+        "fwhash": "1dac2d6f605870147dfd40898be0feb61dc0e4374e81d92d5c274a76642f5ce3"
+      }
+    ],
+    "delta": []
+  },
+  "previous": {
+    "full": [
+      {
+        "filename": "1.0.40_noradio_1118208_fw.bin",
+        "version": "1.0.40",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "70397ddd04e90d3a2161e94fa51734caa5f64b5bde40ac95cb1dd7f0099b43fb",
+        "fwhash": "83c0b0f4b39548d394912253f4e950806e019c04ecb90cd600f7cdda26a87e9a"
+      },
+      {
+        "filename": "1.0.40_ble_1314816_fw.bin",
+        "version": "1.0.40",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "6623dadf8090b3debc9e47902ab8d927109ccfa58662f7d5e6bde4b46fb8e64e",
+        "fwhash": "6c1a0f4e932bfb05b8876bb3e6a4a541b55377db75453999b346d6dad1bcfff9"
+      },
+      {
+        "filename": "1.0.39_noradio_1118208_fw.bin",
+        "version": "1.0.39",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "4062bd2d448d162398712ceea4bbc36fb917196ff1c0561ea94a71f7e40c946c",
+        "fwhash": "ee8493fcc670328adcd4840d42ca38de39475c693a79c64bf5d85d699f5c8790"
+      },
+      {
+        "filename": "1.0.39_ble_1314816_fw.bin",
+        "version": "1.0.39",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "d256b66def6592501b01d018d17597fa0aec2c42e636348b9f6ddd9410a7728b",
+        "fwhash": "0d2be1a26dbc16f3f64e04634297c9bc98131e25ab5534f5c67fbd0bdf1e0f36"
+      },
+      {
+        "filename": "1.0.38_noradio_1118208_fw.bin",
+        "version": "1.0.38",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "205b0f181541f04394c9644669bf7d9f31108431fd7174a365c449aaa16f1f2e",
+        "fwhash": "8443d0d91f105caf2abe20536c265d9d3901c5ec69d3d11f50553bde3fffd762"
+      },
+      {
+        "filename": "1.0.38_ble_1314816_fw.bin",
+        "version": "1.0.38",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "dcc6cbc7aa503e2cdadf31a6e8548b8125a7229ab84c487ed0d8b23f4c7e0c00",
+        "fwhash": "36b46d177a3992adfac97098cfeffd3085c4c7ab0cf8374361d1461c8b9cfb97"
+      },
+      {
+        "filename": "1.0.37_noradio_1118208_fw.bin",
+        "version": "1.0.37",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "73b93273d1db2bfbe5dababa14f37fe149702ea6775b5986f0e15403a49132e7",
+        "fwhash": "6fb172ffbd8eeff55ec6dfc995db306ee6d1976a50fedcc1e66dd1bb2f77eb9d"
+      },
+      {
+        "filename": "1.0.37_ble_1314816_fw.bin",
+        "version": "1.0.37",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "66ebc29054c44c01e095db71d6599e42962635e233cd1bc0cdaf1f0941f08c74",
+        "fwhash": "ff1a9758858fa0bf8c16709a26a2db08deb203c9919e679d6b83d0c955719066"
+      },
+      {
+        "filename": "1.0.36_noradio_1118208_fw.bin",
+        "version": "1.0.36",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "8c7e1f1238996cd62208e1606842f1d51816299ed8a9146209f02c3a508a51b8",
+        "fwhash": "326ca379adaa727644b967767b43ae9a0be63058628a4af5e95eedf3a610c5c7"
+      },
+      {
+        "filename": "1.0.36_ble_1314816_fw.bin",
+        "version": "1.0.36",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "cf2bceac55c45a945af1a32ceed400d5fec48de99d2dafbe38e7d32ce625238b",
+        "fwhash": "82f63c5870bb796221a2e859506a6c555dec6577e607ce4d6eb965b72777002a"
+      },
+      {
+        "filename": "1.0.36-beta1_noradio_1118208_fw.bin",
+        "version": "1.0.36-beta1",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "e152f3a4fb09d5e9e52b70cee6244147e3076cab355ce2e5e5fb013e52bc8f6f",
+        "fwhash": "6eaa9d9efbd8ee1238b6f3de76f478e86d42e930ea7bb33c0b24c145aa881f0a"
+      },
+      {
+        "filename": "1.0.36-beta1_ble_1314816_fw.bin",
+        "version": "1.0.36-beta1",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "06d1699f2f2bc85a2013ce536984c449cc245a5e1b0dbe9d3db3bec9c780cfd4",
+        "fwhash": "722db4704b39af05f075014dd6e677cf50b2d159ff7f28b32c4b2cd2915813fa"
+      },
+      {
+        "filename": "1.0.35_noradio_1118208_fw.bin",
+        "version": "1.0.35",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "a5c6038250455ad07e2625884e34bf1adb6409406ba932bd6161701abcb8ad35",
+        "fwhash": "a8c96a4c7d031aaa8d87a88e8e383199dde4e9d2d3f839c04438f26d63fa6b88"
+      },
+      {
+        "filename": "1.0.35_ble_1314816_fw.bin",
+        "version": "1.0.35",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "b1cae0d0bf60feb8b2423e179843ab25d13221175a7a9fac8aa184383c6d3e53",
+        "fwhash": "4f635c225302b486f5c2c98b28e074ee9ae8ed9bb0c68ab24943e12641d8f68d"
+      },
+      {
+        "filename": "1.0.35-beta1_noradio_1118208_fw.bin",
+        "version": "1.0.35-beta1",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "0ecaa24adac3c4b4b4ea80c150a60741e618da89693e7387db4fa8fda14d8df9",
+        "fwhash": "c37c1eb3fa6a3b57518ed64302f037e3dabdf7307ea848a007f58edd3fee03da"
+      },
+      {
+        "filename": "1.0.35-beta1_ble_1314816_fw.bin",
+        "version": "1.0.35-beta1",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "904f47a885693b9193ce8fb28e6b693bec776302c03cdd7d5c5555e154cf703c",
+        "fwhash": "13aa3a2bf03043fa94f78d5de974d48b5b2ec05149b512e1035e0db619fcf25f"
+      },
+      {
+        "filename": "1.0.34_noradio_1118208_fw.bin",
+        "version": "1.0.34",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "d5c9fdf326433ed22a6e442393f2bdbd3b7adf5f1d59102b7e607ed98559c388",
+        "fwhash": "fe14808dc6765227e8bbbf54c0351ae3d19bdb3a4686d20713d798f285536394"
+      },
+      {
+        "filename": "1.0.34_ble_1314816_fw.bin",
+        "version": "1.0.34",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "e427cf8eee49dcf23c874ddb761717a9fad1b866a049c7f14f94f227ed1ac55a",
+        "fwhash": "bcc185701b8beb28712d6aa1fad71a98e2d666006d9ba422a3b187cc5b8dbe9e"
+      },
+      {
+        "filename": "1.0.33_noradio_1118208_fw.bin",
+        "version": "1.0.33",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "cmphash": "631064c886c854a0df1fc9f2af924459492872f0dec67a3f643f3b291ea83935",
+        "fwhash": "5f94fae11eb294eccce579d9ae2fe3ad44fdd33d7588820b2070c904bdad034e"
+      },
+      {
+        "filename": "1.0.33_ble_1314816_fw.bin",
+        "version": "1.0.33",
+        "config": "ble",
+        "fwsize": 1314816,
+        "cmphash": "004ff36f99001703d3627306801c3cf93a4c8a49e485939926e23a79188137fe",
+        "fwhash": "33215bd82307bf01f7cdddd06ed18aef7c178a87863a42186287a20ac12b46f2"
+      }
+    ],
+    "delta": [
+      {
+        "filename": "deltas/1.0.35_noradio_from_1.0.35_ble_sizes_1118208_1134120_patch.bin",
+        "version": "1.0.35",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "from_version": "1.0.35",
+        "from_config": "ble",
+        "patch_size": 1134120,
+        "cmphash": "13194a6106b7880b2c59dc2c98272779075128bca44ca019f7f973e6ce02c5f7",
+        "fwhash": "a8c96a4c7d031aaa8d87a88e8e383199dde4e9d2d3f839c04438f26d63fa6b88"
+      },
+      {
+        "filename": "deltas/1.0.35_noradio_from_1.0.34_noradio_sizes_1118208_1156224_patch.bin",
+        "version": "1.0.35",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "from_version": "1.0.34",
+        "from_config": "noradio",
+        "patch_size": 1156224,
+        "cmphash": "9033a7e73f3c01842475198c7f0b808e1d838615ef8eeb827be902af00b97e76",
+        "fwhash": "a8c96a4c7d031aaa8d87a88e8e383199dde4e9d2d3f839c04438f26d63fa6b88"
+      },
+      {
+        "filename": "deltas/1.0.35_ble_from_1.0.35_noradio_sizes_1314816_1361136_patch.bin",
+        "version": "1.0.35",
+        "config": "ble",
+        "fwsize": 1314816,
+        "from_version": "1.0.35",
+        "from_config": "noradio",
+        "patch_size": 1361136,
+        "cmphash": "86558758642522b1eee671acde6ca9238798162b5ad0fb074997f665010905ee",
+        "fwhash": "4f635c225302b486f5c2c98b28e074ee9ae8ed9bb0c68ab24943e12641d8f68d"
+      },
+      {
+        "filename": "deltas/1.0.35_ble_from_1.0.34_ble_sizes_1314816_1353072_patch.bin",
+        "version": "1.0.35",
+        "config": "ble",
+        "fwsize": 1314816,
+        "from_version": "1.0.34",
+        "from_config": "ble",
+        "patch_size": 1353072,
+        "cmphash": "6584d4ce920b5acadc118cb382271ffb44d5752ae234ef32cc2663926782b533",
+        "fwhash": "4f635c225302b486f5c2c98b28e074ee9ae8ed9bb0c68ab24943e12641d8f68d"
+      },
+      {
+        "filename": "deltas/1.0.34_noradio_from_1.0.35_noradio_sizes_1118208_1157976_patch.bin",
+        "version": "1.0.34",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "from_version": "1.0.35",
+        "from_config": "noradio",
+        "patch_size": 1157976,
+        "cmphash": "921728bf31006bf80860a845224276ce5b92e7cc5aceab2a710cf112757d095c",
+        "fwhash": "fe14808dc6765227e8bbbf54c0351ae3d19bdb3a4686d20713d798f285536394"
+      },
+      {
+        "filename": "deltas/1.0.34_noradio_from_1.0.34_ble_sizes_1118208_1133208_patch.bin",
+        "version": "1.0.34",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "from_version": "1.0.34",
+        "from_config": "ble",
+        "patch_size": 1133208,
+        "cmphash": "a8e6b650f2ce89defc43693006b786b8d424872e49f35b915fc50f29b0dbb019",
+        "fwhash": "fe14808dc6765227e8bbbf54c0351ae3d19bdb3a4686d20713d798f285536394"
+      },
+      {
+        "filename": "deltas/1.0.34_noradio_from_1.0.33_noradio_sizes_1118208_1271808_patch.bin",
+        "version": "1.0.34",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "from_version": "1.0.33",
+        "from_config": "noradio",
+        "patch_size": 1271808,
+        "cmphash": "738355922d430fb85d0f305b2d99fa71b4c754b7ba14a7bbd14793c27d80dd60",
+        "fwhash": "fe14808dc6765227e8bbbf54c0351ae3d19bdb3a4686d20713d798f285536394"
+      },
+      {
+        "filename": "deltas/1.0.34_ble_from_1.0.35_ble_sizes_1314816_1354272_patch.bin",
+        "version": "1.0.34",
+        "config": "ble",
+        "fwsize": 1314816,
+        "from_version": "1.0.35",
+        "from_config": "ble",
+        "patch_size": 1354272,
+        "cmphash": "8996d89a188bb0576bb4706f427e400cddf3911b65216fd004b7fab34d566b9e",
+        "fwhash": "bcc185701b8beb28712d6aa1fad71a98e2d666006d9ba422a3b187cc5b8dbe9e"
+      },
+      {
+        "filename": "deltas/1.0.34_ble_from_1.0.34_noradio_sizes_1314816_1359648_patch.bin",
+        "version": "1.0.34",
+        "config": "ble",
+        "fwsize": 1314816,
+        "from_version": "1.0.34",
+        "from_config": "noradio",
+        "patch_size": 1359648,
+        "cmphash": "1f9e27c61b4c7e42a1e7db17f4488eba7402aa31b41807a9f8cfae9c91a7fd6b",
+        "fwhash": "bcc185701b8beb28712d6aa1fad71a98e2d666006d9ba422a3b187cc5b8dbe9e"
+      },
+      {
+        "filename": "deltas/1.0.34_ble_from_1.0.33_ble_sizes_1314816_1499232_patch.bin",
+        "version": "1.0.34",
+        "config": "ble",
+        "fwsize": 1314816,
+        "from_version": "1.0.33",
+        "from_config": "ble",
+        "patch_size": 1499232,
+        "cmphash": "5c83cce1346847ff452bf08682f11e0d114130542e6b3927b88fe3849957d28c",
+        "fwhash": "bcc185701b8beb28712d6aa1fad71a98e2d666006d9ba422a3b187cc5b8dbe9e"
+      },
+      {
+        "filename": "deltas/1.0.33_noradio_from_1.0.34_noradio_sizes_1118208_1275672_patch.bin",
+        "version": "1.0.33",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "from_version": "1.0.34",
+        "from_config": "noradio",
+        "patch_size": 1275672,
+        "cmphash": "40f7baacfbbd068b7e41ad0b94d46b5ccb3c964490e32eaee4aba8630ff51d63",
+        "fwhash": "5f94fae11eb294eccce579d9ae2fe3ad44fdd33d7588820b2070c904bdad034e"
+      },
+      {
+        "filename": "deltas/1.0.33_noradio_from_1.0.33_ble_sizes_1118208_1131768_patch.bin",
+        "version": "1.0.33",
+        "config": "noradio",
+        "fwsize": 1118208,
+        "from_version": "1.0.33",
+        "from_config": "ble",
+        "patch_size": 1131768,
+        "cmphash": "2bd865db2af0db1ed540cdf157750c625a95670fe7ef26858ee876759800e153",
+        "fwhash": "5f94fae11eb294eccce579d9ae2fe3ad44fdd33d7588820b2070c904bdad034e"
+      },
+      {
+        "filename": "deltas/1.0.33_ble_from_1.0.34_ble_sizes_1314816_1499232_patch.bin",
+        "version": "1.0.33",
+        "config": "ble",
+        "fwsize": 1314816,
+        "from_version": "1.0.34",
+        "from_config": "ble",
+        "patch_size": 1499232,
+        "cmphash": "4c6d82c530660d274105ed031b1ef843181c415be479255bb6a9d1f8e81ad2ee",
+        "fwhash": "33215bd82307bf01f7cdddd06ed18aef7c178a87863a42186287a20ac12b46f2"
+      },
+      {
+        "filename": "deltas/1.0.33_ble_from_1.0.33_noradio_sizes_1314816_1357848_patch.bin",
+        "version": "1.0.33",
+        "config": "ble",
+        "fwsize": 1314816,
+        "from_version": "1.0.33",
+        "from_config": "noradio",
+        "patch_size": 1357848,
+        "cmphash": "081a60728a28b703e3ab04abbad72a0e2ec9f4c4a7b41dd5930c0d546da11cad",
+        "fwhash": "33215bd82307bf01f7cdddd06ed18aef7c178a87863a42186287a20ac12b46f2"
+      }
+    ]
+  }
+}
