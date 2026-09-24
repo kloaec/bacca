@@ -4,10 +4,8 @@
 use crate::device_service::{BitboxState, DeviceState, LatestFirmware, Reporter, TaskResult};
 
 use bitbox_manager::{
-    check_update, get_status,
-    noise_config::{default_config_dir, NoiseConfig, NoiseConfigNoCache, PersistedNoiseConfig},
-    update_firmware, DeviceHandle, DeviceStatus, Mode, Product, Progress, UpdateOptions,
-    UpdateOutcome,
+    check_update, default_config_dir, get_status, update_firmware, DeviceHandle, DeviceStatus,
+    Mode, Product, Progress, UpdateOptions, UpdateOutcome,
 };
 
 /// Format a firmware hash in groups of 8 hex characters, easier to compare with the device's
@@ -175,15 +173,12 @@ fn report_progress(reporter: &Reporter, progress: Progress) {
 /// Update the firmware to the latest release.
 pub fn update(reporter: &Reporter) -> TaskResult {
     log::info!("bitbox::update()");
-    let noise_config: Box<dyn NoiseConfig + Send> = match default_config_dir() {
-        Some(dir) => Box::new(PersistedNoiseConfig::new(dir)),
-        None => {
-            log::warn!("No config directory, the BitBox pairing will not be remembered.");
-            Box::new(NoiseConfigNoCache)
-        }
-    };
+    let config_dir = default_config_dir();
+    if config_dir.is_none() {
+        log::warn!("No config directory, the BitBox pairing will not be remembered.");
+    }
     let options = UpdateOptions {
-        noise_config,
+        config_dir,
         ..Default::default()
     };
     let res = update_firmware(&options, &mut |p| report_progress(reporter, p));

@@ -5,36 +5,39 @@
 //! This doesn't use the GitHub API (rate limited), only the release download URLs.
 
 use bitbox_manager::{
-    releases::{asset_version, download, FirmwareRelease},
+    releases::{download, FirmwareRelease},
     Product, Version,
 };
-
-const TAG: &str = "firmware/v9.27.1";
 
 #[test]
 #[ignore]
 fn live_download_all_products() {
-    let version = Version::parse("9.27.1").unwrap();
-    for product in [
-        Product::BitBox02Multi,
-        Product::BitBox02BtcOnly,
-        Product::BitBox02NovaMulti,
-        Product::BitBox02NovaBtcOnly,
+    for (product, asset_name) in [
+        (
+            Product::BitBox02Multi,
+            "firmware-bitbox02-multi.v9.27.1.signed.bin",
+        ),
+        (
+            Product::BitBox02BtcOnly,
+            "firmware-bitbox02-btconly.v9.27.1.signed.bin",
+        ),
+        (
+            Product::BitBox02NovaMulti,
+            "firmware-bitbox02nova-multi.v9.27.1.signed.bin",
+        ),
+        (
+            Product::BitBox02NovaBtcOnly,
+            "firmware-bitbox02nova-btconly.v9.27.1.signed.bin",
+        ),
     ] {
-        // The current naming scheme is the first prefix.
-        let prefix = product.release_asset_prefixes()[0];
-        let asset_name = format!("{}.v{}.signed.bin", prefix, version);
-        assert_eq!(asset_version(product, &asset_name), Some(version));
         let release = FirmwareRelease {
             product,
-            version,
-            tag: TAG.to_string(),
+            version: Version::new(9, 27, 1),
             url: format!(
-                "https://github.com/BitBoxSwiss/bitbox02-firmware/releases/download/{}/{}",
-                TAG.replace('/', "%2F"),
+                "https://github.com/BitBoxSwiss/bitbox02-firmware/releases/download/firmware%2Fv9.27.1/{}",
                 asset_name
             ),
-            asset_name,
+            asset_name: asset_name.to_string(),
             published_sighash: None,
         };
         let firmware = download(&release).unwrap_or_else(|e| panic!("{product}: {e}"));

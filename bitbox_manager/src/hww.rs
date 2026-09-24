@@ -5,107 +5,67 @@
 //! states, so the (small) protocol is reimplemented here, following:
 //! - `bitbox-api-rs/src/communication.rs` (HWW framing and the unencrypted `i` info call),
 //! - `bitbox-api-rs/src/lib.rs` (unlock, noise XX handshake, pairing code, encrypted queries),
+//! - `bitbox-api-rs/src/noise.rs` (persisted pairing),
 //! - `bitbox02-firmware/src/rust/bitbox02-rust/src/hww.rs` and `hww/noise.rs` (device side),
-//! - `bitbox02-firmware/messages/{hww,system,bitbox02_system}.proto` (protobuf messages),
+//! - `bitbox02-firmware/messages/{hww,system}.proto` (protobuf messages),
 //! - `reboot()` in `bitbox-wallet-app/vendor/github.com/BitBoxSwiss/bitbox02-api-go/api/firmware/system.go`.
 
-use std::{fmt, thread, time::Duration};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use noise_protocol::{CipherState, HandshakeState, U8Array, DH};
 use noise_rust_crypto::{sensitive::Sensitive, ChaCha20Poly1305, Sha256, X25519};
 
-use crate::{
-    noise_config::{ConfigError, NoiseConfig},
-    product::{Product, Version},
-    u2fhid::{HidError, U2fHidDevice},
-};
+use crate::{u2fhid::U2fHid, Error, Product, Version};
 
 /// U2F HID command used by the firmware ("endpoint").
-pub const FIRMWARE_CMD: u8 = 0x80 + 0x40 + 0x01;
-
+const FIRMWARE_CMD: u8 = 0x80 + 0x40 + 0x01;
 // Replies are immediate: long running operations are polled (HWW_RSP_NOTREADY).
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 // HWW framing, since firmware v7.0.0.
 const HWW_REQ_NEW: u8 = 0x00;
 const HWW_REQ_RETRY: u8 = 0x01;
-const HWW_INFO: u8 = b'i';
 const HWW_RSP_ACK: u8 = 0x00;
 const HWW_RSP_NOTREADY: u8 = 0x01;
 const HWW_RSP_BUSY: u8 = 0x02;
 const HWW_RSP_NACK: u8 = 0x03;
 
+/// Sent without the HWW framing, to get the version first.
+const OP_INFO: u8 = b'i';
+const OP_UNLOCK: u8 = b'u';
 const OP_I_CAN_HAS_HANDSHAEK: u8 = b'h';
 const OP_HER_COMEZ_TEH_HANDSHAEK: u8 = b'H';
 const OP_I_CAN_HAS_PAIRIN_VERIFICASHUN: u8 = b'v';
 const OP_NOISE_MSG: u8 = b'n';
-const OP_UNLOCK: u8 = b'u';
 const RESPONSE_SUCCESS: u8 = 0x00;
 
 const NOISE_PROLOGUE: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256";
-
 type Handshake = HandshakeState<X25519, ChaCha20Poly1305, Sha256>;
 
-#[derive(Debug)]
-pub enum HwwError {
-    Hid(HidError),
-    /// Firmwares before 7.0.0 use an older protocol that is not supported.
-    FirmwareTooOld(Version),
-    UnexpectedResponse(String),
-    Noise,
-    PairingRejected,
-    Config(ConfigError),
-    /// The device returned an error (protobuf `Error`); 104 is "user aborted".
-    Device {
-        code: i32,
-        message: String,
-    },
+/// `Request { reboot: RebootRequest { purpose: UPGRADE } }`: field 18 (key `18 << 3 | 2`, varint
+/// encoded as `0x92 0x01`) with an empty message, as UPGRADE is 0, the proto3 default.
+const REBOOT_UPGRADE_REQUEST: &[u8] = &[0x92, 0x01, 0x00];
+
+fn noise_error() -> Error {
+    Error::Other("encrypted channel (noise) error".to_string())
 }
 
-impl HwwError {
-    pub fn is_user_abort(&self) -> bool {
-        matches!(self, HwwError::Device { code: 104, .. })
-    }
-}
-
-impl fmt::Display for HwwError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Hid(e) => write!(f, "{}", e),
-            Self::FirmwareTooOld(v) => write!(
-                f,
-                "firmware v{} is too old to be supported (7.0.0 or later required)",
-                v
-            ),
-            Self::UnexpectedResponse(s) => write!(f, "unexpected response from device: {}", s),
-            Self::Noise => write!(f, "encrypted channel (noise) error"),
-            Self::PairingRejected => write!(f, "pairing rejected on the device"),
-            Self::Config(e) => write!(f, "{}", e),
-            Self::Device { code: 104, .. } => write!(f, "aborted by the user on the device"),
-            Self::Device { code, message } => {
-                write!(f, "device returned error {}: {}", code, message)
-            }
-        }
-    }
-}
-
-impl std::error::Error for HwwError {}
-
-impl From<HidError> for HwwError {
-    fn from(e: HidError) -> Self {
-        HwwError::Hid(e)
-    }
-}
-
-impl From<ConfigError> for HwwError {
-    fn from(e: ConfigError) -> Self {
-        HwwError::Config(e)
-    }
+fn unexpected(s: impl std::fmt::Display) -> Error {
+    Error::Other(format!("unexpected response from device: {}", s))
 }
 
 /// Information returned by the unencrypted `i` call. Available without pairing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HwwInfo {
+pub struct FirmwareInfo {
     pub version: Version,
     /// `None` if the platform/edition bytes are unknown.
     pub product: Option<Product>,
@@ -114,107 +74,80 @@ pub struct HwwInfo {
     pub initialized: Option<bool>,
 }
 
-/// Parse the response to the `i` call. See `get_info()` in `bitbox-api-rs/src/communication.rs`.
-pub fn parse_info(response: &[u8]) -> Result<HwwInfo, HwwError> {
-    let err = || HwwError::UnexpectedResponse(format!("info: {}", hex::encode(response)));
+/// Parse the response to the `i` call. See `get_info()` in `bitbox-api-rs/src/communication.rs`:
+/// `version len | version | platform | edition | unlocked | initialized (since v9.20.0)`.
+fn parse_info(response: &[u8]) -> Result<FirmwareInfo, Error> {
+    let err = || unexpected(format!("info: {}", hex::encode(response)));
     let (&vlen, rest) = response.split_first().ok_or_else(err)?;
-    let vbytes = rest.get(..vlen as usize).ok_or_else(err)?;
-    let rest = &rest[vlen as usize..];
-    let vstr = std::str::from_utf8(vbytes).map_err(|_| err())?;
-    let version = vstr
-        .strip_prefix('v')
+    let vstr = rest.get(..vlen as usize).ok_or_else(err)?;
+    let version = std::str::from_utf8(vstr)
+        .ok()
+        .and_then(|s| s.strip_prefix('v'))
         .and_then(Version::parse)
         .ok_or_else(err)?;
-    const PLATFORM_BITBOX02: u8 = 0x00;
-    const PLATFORM_BITBOX02_NOVA: u8 = 0x02;
-    const EDITION_MULTI: u8 = 0x00;
-    const EDITION_BTCONLY: u8 = 0x01;
-    let platform = *rest.first().ok_or_else(err)?;
-    let edition = *rest.get(1).ok_or_else(err)?;
-    let unlocked = match rest.get(2) {
-        Some(0) => false,
-        Some(1) => true,
-        _ => return Err(err()),
+    let bool_at = |i: usize| match rest.get(vlen as usize + i) {
+        None => Ok(None),
+        Some(0) => Ok(Some(false)),
+        Some(1) => Ok(Some(true)),
+        _ => Err(err()),
     };
-    let initialized = match rest.get(3) {
-        None => None,
-        Some(0) => Some(false),
-        Some(1) => Some(true),
-        _ => return Err(err()),
-    };
-    let product = match (platform, edition) {
-        (PLATFORM_BITBOX02, EDITION_MULTI) => Some(Product::BitBox02Multi),
-        (PLATFORM_BITBOX02, EDITION_BTCONLY) => Some(Product::BitBox02BtcOnly),
-        (PLATFORM_BITBOX02_NOVA, EDITION_MULTI) => Some(Product::BitBox02NovaMulti),
-        (PLATFORM_BITBOX02_NOVA, EDITION_BTCONLY) => Some(Product::BitBox02NovaBtcOnly),
+    let product = match rest.get(vlen as usize..vlen as usize + 2).ok_or_else(err)? {
+        [0x00, 0x00] => Some(Product::BitBox02Multi),
+        [0x00, 0x01] => Some(Product::BitBox02BtcOnly),
+        [0x02, 0x00] => Some(Product::BitBox02NovaMulti),
+        [0x02, 0x01] => Some(Product::BitBox02NovaBtcOnly),
         _ => None,
     };
-    Ok(HwwInfo {
+    Ok(FirmwareInfo {
         version,
         product,
-        unlocked,
-        initialized,
+        unlocked: bool_at(2)?.ok_or_else(err)?,
+        initialized: bool_at(3)?,
     })
 }
 
-/// Device information returned by the encrypted `DeviceInfo` call (`DeviceInfoResponse` in
-/// `bitbox02-firmware/messages/bitbox02_system.proto`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DeviceInfo {
-    pub name: String,
-    pub initialized: bool,
-    pub version: String,
-    pub mnemonic_passphrase_enabled: bool,
-    pub monotonic_increments_remaining: u32,
-    pub securechip_model: String,
-    /// Not present on legacy bootloaders.
-    pub bootloader_version: Option<String>,
-}
-
 /// A BitBox02 in firmware mode, before pairing.
-pub struct FirmwareDevice {
-    comm: U2fHidDevice,
-    info: HwwInfo,
+pub(crate) struct FirmwareDevice {
+    comm: U2fHid,
+    pub info: FirmwareInfo,
 }
 
 impl FirmwareDevice {
     /// Open the connection and query the unencrypted device info.
-    pub fn new(device: hidapi::HidDevice) -> Result<Self, HwwError> {
-        let comm = U2fHidDevice::new(device, FIRMWARE_CMD);
-        let info = parse_info(&comm.query(&[HWW_INFO], TIMEOUT)?)?;
+    pub(crate) fn open(device: hidapi::HidDevice) -> Result<Self, Error> {
+        let comm = U2fHid::new(device, FIRMWARE_CMD);
+        let info = parse_info(&comm.query(&[OP_INFO], TIMEOUT)?)?;
         if info.version < Version::new(7, 0, 0) {
-            return Err(HwwError::FirmwareTooOld(info.version));
+            return Err(Error::Other(format!(
+                "firmware v{} is too old to be supported (7.0.0 or later required)",
+                info.version
+            )));
         }
         Ok(FirmwareDevice { comm, info })
-    }
-
-    pub fn info(&self) -> &HwwInfo {
-        &self.info
     }
 
     /// Unlock the device (the user enters their password on the device if it is initialized and
     /// locked; returns immediately otherwise) and establish the encrypted channel.
     ///
     /// If a pairing confirmation is needed, `on_pairing_code` is called with the code, which the
-    /// user must compare with the one on the device screen and confirm on the device.
-    pub fn unlock_and_pair(
+    /// user must compare with the one on the device screen and confirm on the device. The pairing
+    /// is remembered in `config_dir`, if any.
+    pub(crate) fn unlock_and_pair(
         self,
-        noise_config: &dyn NoiseConfig,
+        config_dir: Option<&Path>,
         on_pairing_code: &mut dyn FnMut(&str),
-    ) -> Result<PairedDevice, HwwError> {
+    ) -> Result<PairedDevice, Error> {
         // The status is ignored like bitbox-api does: an uninitialized device returns
         // OP_STATUS_FAILURE_UNINITIALIZED but can still be paired with.
         hww_query(&self.comm, &[OP_UNLOCK])?;
 
-        let mut config = noise_config.read_config()?;
+        let mut config = read_config(config_dir)?;
         let host_key = match config.app_static_privkey {
             Some(k) => <Sensitive<[u8; 32]> as U8Array>::from_slice(&k),
             None => {
                 let k = X25519::genkey();
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&k[..]);
-                config.app_static_privkey = Some(arr);
-                noise_config.store_config(&config)?;
+                config.app_static_privkey = Some(<[u8; 32]>::try_from(&k[..]).unwrap());
+                store_config(config_dir, &config)?;
                 k
             }
         };
@@ -229,33 +162,50 @@ impl FirmwareDevice {
         );
 
         if hww_query(&self.comm, &[OP_I_CAN_HAS_HANDSHAEK])? != [RESPONSE_SUCCESS] {
-            return Err(HwwError::Noise);
+            return Err(noise_error());
         }
-        let host_handshake_1 = host.write_message_vec(b"").map_err(|_| HwwError::Noise)?;
-        let bb02_handshake_1 = handshake_query(&self.comm, &host_handshake_1)?;
+        let handshake_query = |msg: Vec<u8>| -> Result<Vec<u8>, Error> {
+            match hww_query(
+                &self.comm,
+                &[&[OP_HER_COMEZ_TEH_HANDSHAEK], &msg[..]].concat(),
+            )? {
+                r if r.first() == Some(&RESPONSE_SUCCESS) => Ok(r[1..].to_vec()),
+                _ => Err(noise_error()),
+            }
+        };
+        let host_handshake_1 = host.write_message_vec(b"").map_err(|_| noise_error())?;
+        let bb02_handshake_1 = handshake_query(host_handshake_1)?;
         host.read_message_vec(&bb02_handshake_1)
-            .map_err(|_| HwwError::Noise)?;
-        let host_handshake_2 = host.write_message_vec(b"").map_err(|_| HwwError::Noise)?;
-        let bb02_handshake_2 = handshake_query(&self.comm, &host_handshake_2)?;
+            .map_err(|_| noise_error())?;
+        let host_handshake_2 = host.write_message_vec(b"").map_err(|_| noise_error())?;
+        let bb02_handshake_2 = handshake_query(host_handshake_2)?;
 
-        let remote_static = host.get_rs().ok_or(HwwError::Noise)?;
-        let required_by_app = !config.contains_device_static_pubkey(&remote_static);
+        let remote_static = host.get_rs().ok_or_else(noise_error)?;
+        let required_by_app = !config
+            .device_static_pubkeys
+            .iter()
+            .any(|k| k[..] == remote_static[..]);
         let required_by_device = bb02_handshake_2 == [0x01];
         if required_by_app || required_by_device {
-            let hash: [u8; 32] = host.get_hash().try_into().map_err(|_| HwwError::Noise)?;
+            let hash: [u8; 32] = host.get_hash().try_into().map_err(|_| noise_error())?;
             on_pairing_code(&format_pairing_code(&hash));
             let r = hww_query(&self.comm, &[OP_I_CAN_HAS_PAIRIN_VERIFICASHUN])?;
             if r != [RESPONSE_SUCCESS] {
-                return Err(HwwError::PairingRejected);
+                return Err(Error::Other("pairing rejected on the device".to_string()));
             }
-            let mut config = noise_config.read_config()?;
-            config.add_device_static_pubkey(&remote_static);
-            noise_config.store_config(&config)?;
+            let mut config = read_config(config_dir)?;
+            if !config
+                .device_static_pubkeys
+                .iter()
+                .any(|k| k[..] == remote_static[..])
+            {
+                config.device_static_pubkeys.push(remote_static.to_vec());
+            }
+            store_config(config_dir, &config)?;
         }
         let (send, recv) = host.get_ciphers();
         Ok(PairedDevice {
             comm: self.comm,
-            info: self.info,
             send,
             recv,
         })
@@ -263,52 +213,38 @@ impl FirmwareDevice {
 }
 
 /// A BitBox02 in firmware mode with an established encrypted channel.
-pub struct PairedDevice {
-    comm: U2fHidDevice,
-    info: HwwInfo,
+pub(crate) struct PairedDevice {
+    comm: U2fHid,
     send: CipherState<ChaCha20Poly1305>,
     recv: CipherState<ChaCha20Poly1305>,
 }
 
 impl PairedDevice {
-    pub fn info(&self) -> &HwwInfo {
-        &self.info
-    }
-
-    fn encrypted_query(&mut self, request: &[u8]) -> Result<Vec<u8>, HwwError> {
-        let mut msg = vec![OP_NOISE_MSG];
-        msg.extend_from_slice(&self.send.encrypt_vec(request));
+    /// Send an encrypted protobuf `Request`, return an `Error::Device` if the device replies with
+    /// an error `Response`.
+    fn encrypted_query(&mut self, request: &[u8]) -> Result<(), Error> {
+        let msg = [&[OP_NOISE_MSG], &self.send.encrypt_vec(request)[..]].concat();
         let response = hww_query(&self.comm, &msg)?;
         match response.split_first() {
             Some((&RESPONSE_SUCCESS, encrypted)) => {
                 let decrypted = self
                     .recv
                     .decrypt_vec(encrypted)
-                    .map_err(|_| HwwError::Noise)?;
-                check_response_error(&decrypted)?;
-                Ok(decrypted)
+                    .map_err(|_| noise_error())?;
+                check_response_error(&decrypted)
             }
-            _ => Err(HwwError::UnexpectedResponse(
-                "encrypted query failed".to_string(),
-            )),
+            _ => Err(unexpected("encrypted query failed")),
         }
-    }
-
-    /// Query the device info over the encrypted channel.
-    pub fn device_info(&mut self) -> Result<DeviceInfo, HwwError> {
-        let response = self.encrypted_query(&proto::device_info_request())?;
-        proto::parse_device_info_response(&response)
     }
 
     /// Ask the device to reboot into the bootloader to upgrade the firmware. The user must
     /// confirm on the device ("Proceed to upgrade?"). This blocks until the user confirms (the
-    /// device then disconnects) or rejects (`HwwError::Device { code: 104 }`).
-    pub fn reboot_to_bootloader(mut self) -> Result<(), HwwError> {
-        match self.encrypted_query(&proto::reboot_upgrade_request()) {
-            Ok(_) => Ok(()),
+    /// device then disconnects) or rejects (`Error::Device`).
+    pub(crate) fn reboot_to_bootloader(mut self) -> Result<(), Error> {
+        match self.encrypted_query(REBOOT_UPGRADE_REQUEST) {
             // Like the Go library, we only return errors from the device. Otherwise we assume it's
             // an IO error due to the device rebooting.
-            Err(e @ HwwError::Device { .. }) => Err(e),
+            Err(e @ Error::Device(_)) => Err(e),
             Err(e) => {
                 log::debug!(
                     "Error after reboot request, assuming the device rebooted: {}",
@@ -316,31 +252,20 @@ impl PairedDevice {
                 );
                 Ok(())
             }
+            Ok(()) => Ok(()),
         }
-    }
-}
-
-fn handshake_query(comm: &U2fHidDevice, msg: &[u8]) -> Result<Vec<u8>, HwwError> {
-    let mut framed = vec![OP_HER_COMEZ_TEH_HANDSHAEK];
-    framed.extend_from_slice(msg);
-    let response = hww_query(comm, &framed)?;
-    match response.split_first() {
-        Some((&RESPONSE_SUCCESS, rest)) => Ok(rest.to_vec()),
-        _ => Err(HwwError::Noise),
     }
 }
 
 /// A query with the HWW framing: busy devices are retried, pending requests polled.
-fn hww_query(comm: &U2fHidDevice, msg: &[u8]) -> Result<Vec<u8>, HwwError> {
-    let mut framed = vec![HWW_REQ_NEW];
-    framed.extend_from_slice(msg);
+fn hww_query(comm: &U2fHid, msg: &[u8]) -> Result<Vec<u8>, Error> {
+    let framed = [&[HWW_REQ_NEW], msg].concat();
     let mut response = loop {
         let r = comm.query(&framed, TIMEOUT)?;
-        if r.first() == Some(&HWW_RSP_BUSY) {
-            thread::sleep(Duration::from_millis(1000));
-            continue;
+        if r.first() != Some(&HWW_RSP_BUSY) {
+            break r;
         }
-        break r;
+        thread::sleep(Duration::from_millis(1000));
     };
     loop {
         match response.first() {
@@ -349,16 +274,10 @@ fn hww_query(comm: &U2fHidDevice, msg: &[u8]) -> Result<Vec<u8>, HwwError> {
                 thread::sleep(Duration::from_millis(200));
                 response = comm.query(&[HWW_REQ_RETRY], TIMEOUT)?;
             }
-            Some(&HWW_RSP_BUSY) => {
-                return Err(HwwError::UnexpectedResponse("device busy".to_string()))
-            }
-            Some(&HWW_RSP_NACK) => {
-                return Err(HwwError::UnexpectedResponse(
-                    "request rejected (NACK)".to_string(),
-                ))
-            }
+            Some(&HWW_RSP_BUSY) => return Err(unexpected("device busy")),
+            Some(&HWW_RSP_NACK) => return Err(unexpected("request rejected (NACK)")),
             _ => {
-                return Err(HwwError::UnexpectedResponse(format!(
+                return Err(unexpected(format!(
                     "unknown HWW response {}",
                     hex::encode(&response)
                 )))
@@ -367,16 +286,9 @@ fn hww_query(comm: &U2fHidDevice, msg: &[u8]) -> Result<Vec<u8>, HwwError> {
     }
 }
 
-fn check_response_error(response: &[u8]) -> Result<(), HwwError> {
-    if let Some((code, message)) = proto::parse_error_response(response)? {
-        return Err(HwwError::Device { code, message });
-    }
-    Ok(())
-}
-
 /// Format the pairing code from the handshake hash, as shown on the device. See `pair()` in
 /// `bitbox-api-rs/src/lib.rs` and `format_hash()` in the firmware `workflow/pairing.rs`.
-pub fn format_pairing_code(hash: &[u8; 32]) -> String {
+fn format_pairing_code(hash: &[u8; 32]) -> String {
     let encoded = base32_encode(hash);
     format!(
         "{} {}\n{} {}",
@@ -392,14 +304,13 @@ fn base32_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut out = String::new();
     for chunk in data.chunks(5) {
-        let mut buf = [0u8; 5];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        let n = u64::from_be_bytes([0, 0, 0, buf[0], buf[1], buf[2], buf[3], buf[4]]);
+        let mut buf = [0u8; 8];
+        buf[3..3 + chunk.len()].copy_from_slice(chunk);
+        let n = u64::from_be_bytes(buf);
         let chars = (chunk.len() * 8).div_ceil(5);
         for i in 0..8 {
             if i < chars {
-                let idx = ((n >> (35 - i * 5)) & 0x1f) as usize;
-                out.push(ALPHABET[idx] as char);
+                out.push(ALPHABET[((n >> (35 - i * 5)) & 0x1f) as usize] as char);
             } else {
                 out.push('=');
             }
@@ -408,60 +319,40 @@ fn base32_encode(data: &[u8]) -> String {
     out
 }
 
-/// Minimal protobuf encoding/decoding for the few messages we need.
-mod proto {
-    use super::{DeviceInfo, HwwError};
-
-    // Field numbers from bitbox02-firmware/messages/hww.proto.
-    const REQUEST_DEVICE_INFO: u64 = 4;
-    const REQUEST_REBOOT: u64 = 18;
-    const RESPONSE_ERROR: u64 = 2;
-    const RESPONSE_DEVICE_INFO: u64 = 4;
-
-    fn encode_varint(mut v: u64, out: &mut Vec<u8>) {
-        loop {
-            let b = (v & 0x7f) as u8;
-            v >>= 7;
-            if v == 0 {
-                out.push(b);
-                return;
+/// If the protobuf `Response` is an `error` (field 2, with `code` field 1 and `message` field 2,
+/// see `hww.proto`), return it as an `Error::Device`.
+fn check_response_error(response: &[u8]) -> Result<(), Error> {
+    for (field, value) in proto_fields(response)? {
+        if let (2, ProtoValue::Bytes(error)) = (field, value) {
+            let mut code = 0;
+            let mut message = String::new();
+            for (f, v) in proto_fields(error)? {
+                match (f, v) {
+                    (1, ProtoValue::Varint(c)) => code = c as i32,
+                    (2, ProtoValue::Bytes(m)) => message = String::from_utf8_lossy(m).into_owned(),
+                    _ => {}
+                }
             }
-            out.push(b | 0x80);
+            return Err(Error::Device(if code == 104 {
+                "aborted by the user on the device".to_string()
+            } else {
+                format!("device returned error {}: {}", code, message)
+            }));
         }
     }
+    Ok(())
+}
 
-    fn encode_len_delimited(field: u64, data: &[u8], out: &mut Vec<u8>) {
-        encode_varint((field << 3) | 2, out);
-        encode_varint(data.len() as u64, out);
-        out.extend_from_slice(data);
-    }
+enum ProtoValue<'a> {
+    Varint(u64),
+    Bytes(&'a [u8]),
+    Fixed,
+}
 
-    /// `Request { device_info: DeviceInfoRequest {} }`.
-    pub fn device_info_request() -> Vec<u8> {
-        let mut out = Vec::new();
-        encode_len_delimited(REQUEST_DEVICE_INFO, &[], &mut out);
-        out
-    }
-
-    /// `Request { reboot: RebootRequest { purpose: UPGRADE } }`. UPGRADE is 0, the default
-    /// value, hence not serialized in proto3.
-    pub fn reboot_upgrade_request() -> Vec<u8> {
-        let mut out = Vec::new();
-        encode_len_delimited(REQUEST_REBOOT, &[], &mut out);
-        out
-    }
-
-    pub enum Value<'a> {
-        Varint(u64),
-        Bytes(&'a [u8]),
-        Fixed,
-    }
-
-    fn err() -> HwwError {
-        HwwError::UnexpectedResponse("invalid protobuf".to_string())
-    }
-
-    fn read_varint(data: &mut &[u8]) -> Result<u64, HwwError> {
+/// Parse the top-level fields of a protobuf message.
+fn proto_fields(mut data: &[u8]) -> Result<Vec<(u64, ProtoValue<'_>)>, Error> {
+    let err = || unexpected("invalid protobuf");
+    let read_varint = |data: &mut &[u8]| -> Result<u64, Error> {
         let mut v = 0u64;
         for i in 0..10 {
             let (&b, rest) = data.split_first().ok_or_else(err)?;
@@ -472,86 +363,98 @@ mod proto {
             }
         }
         Err(err())
-    }
-
-    /// Parse the top-level fields of a message.
-    pub fn fields(mut data: &[u8]) -> Result<Vec<(u64, Value<'_>)>, HwwError> {
-        let mut out = Vec::new();
-        while !data.is_empty() {
-            let key = read_varint(&mut data)?;
-            let field = key >> 3;
-            let value = match key & 7 {
-                0 => Value::Varint(read_varint(&mut data)?),
-                1 | 5 => {
-                    let n = if key & 7 == 1 { 8 } else { 4 };
-                    if data.len() < n {
-                        return Err(err());
-                    }
-                    data = &data[n..];
-                    Value::Fixed
-                }
-                2 => {
-                    let len = read_varint(&mut data)? as usize;
-                    if data.len() < len {
-                        return Err(err());
-                    }
-                    let (v, rest) = data.split_at(len);
-                    data = rest;
-                    Value::Bytes(v)
-                }
-                _ => return Err(err()),
-            };
-            out.push((field, value));
-        }
-        Ok(out)
-    }
-
-    fn string(b: &[u8]) -> String {
-        String::from_utf8_lossy(b).into_owned()
-    }
-
-    /// If the response is a `Response { error: Error { code, message } }`, return it.
-    pub fn parse_error_response(data: &[u8]) -> Result<Option<(i32, String)>, HwwError> {
-        for (field, value) in fields(data)? {
-            if let (RESPONSE_ERROR, Value::Bytes(b)) = (field, value) {
-                let mut code = 0;
-                let mut message = String::new();
-                for (f, v) in fields(b)? {
-                    match (f, v) {
-                        (1, Value::Varint(c)) => code = c as i32,
-                        (2, Value::Bytes(m)) => message = string(m),
-                        _ => {}
-                    }
-                }
-                return Ok(Some((code, message)));
+    };
+    let mut out = Vec::new();
+    while !data.is_empty() {
+        let key = read_varint(&mut data)?;
+        let len = match key & 7 {
+            0 => {
+                out.push((key >> 3, ProtoValue::Varint(read_varint(&mut data)?)));
+                continue;
             }
+            1 => 8,
+            5 => 4,
+            2 => read_varint(&mut data)? as usize,
+            _ => return Err(err()),
+        };
+        if data.len() < len {
+            return Err(err());
         }
-        Ok(None)
+        let (v, rest) = data.split_at(len);
+        data = rest;
+        let value = if key & 7 == 2 {
+            ProtoValue::Bytes(v)
+        } else {
+            ProtoValue::Fixed
+        };
+        out.push((key >> 3, value));
     }
+    Ok(out)
+}
 
-    pub fn parse_device_info_response(data: &[u8]) -> Result<DeviceInfo, HwwError> {
-        for (field, value) in fields(data)? {
-            if let (RESPONSE_DEVICE_INFO, Value::Bytes(b)) = (field, value) {
-                let mut info = DeviceInfo::default();
-                for (f, v) in fields(b)? {
-                    match (f, v) {
-                        (1, Value::Bytes(s)) => info.name = string(s),
-                        (2, Value::Varint(v)) => info.initialized = v != 0,
-                        (3, Value::Bytes(s)) => info.version = string(s),
-                        (4, Value::Varint(v)) => info.mnemonic_passphrase_enabled = v != 0,
-                        (5, Value::Varint(v)) => info.monotonic_increments_remaining = v as u32,
-                        (6, Value::Bytes(s)) => info.securechip_model = string(s),
-                        (9, Value::Bytes(s)) => info.bootloader_version = Some(string(s)),
-                        _ => {}
-                    }
-                }
-                return Ok(info);
-            }
-        }
-        Err(HwwError::UnexpectedResponse(
-            "expected a device info response".to_string(),
-        ))
+/// The persisted pairing, in the same format as `PersistedNoiseConfig` of `bitbox-api`
+/// (`bitbox-api-rs/src/noise.rs`) so a pairing file can be shared with apps using it.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct NoiseConfigData {
+    app_static_privkey: Option<[u8; 32]>,
+    device_static_pubkeys: Vec<Vec<u8>>,
+}
+
+fn config_error(e: impl std::fmt::Display) -> Error {
+    Error::Other(format!("pairing config error: {}", e))
+}
+
+/// Read `<dir>/bitbox.json`. Without a directory, nothing is remembered.
+fn read_config(dir: Option<&Path>) -> Result<NoiseConfigData, Error> {
+    let path = match dir {
+        Some(dir) => dir.join("bitbox.json"),
+        None => return Ok(NoiseConfigData::default()),
+    };
+    if !path.exists() {
+        return Ok(NoiseConfigData::default());
     }
+    let contents = fs::read_to_string(&path).map_err(config_error)?;
+    serde_json::from_str(&contents).map_err(config_error)
+}
+
+/// Write `<dir>/bitbox.json`, creating the directory if needed. On Unix, the directory (if
+/// created) and the file are only accessible by the user.
+fn store_config(dir: Option<&Path>, conf: &NoiseConfigData) -> Result<(), Error> {
+    let Some(dir) = dir else { return Ok(()) };
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(dir).map_err(config_error)?;
+
+    let data = serde_json::to_string(conf).map_err(config_error)?;
+    let path = dir.join("bitbox.json");
+    let mut options = fs::File::options();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path).map_err(config_error)?;
+    // The mode above only applies to a new file.
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(config_error)?;
+    file.write_all(data.as_bytes()).map_err(config_error)
+}
+
+/// The default directory for the pairing file: `<user config dir>/bacca`.
+/// (`$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application Support` on macOS,
+/// `%APPDATA%` on Windows.)
+pub fn default_config_dir() -> Option<PathBuf> {
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    }?;
+    Some(base.join("bacca"))
 }
 
 #[cfg(test)]
@@ -561,42 +464,30 @@ mod tests {
     #[test]
     fn info() {
         // "v9.27.1", BitBox02 Nova, btc-only, unlocked, initialized.
-        let mut r = vec![7];
-        r.extend_from_slice(b"v9.27.1");
-        r.extend_from_slice(&[0x02, 0x01, 0x01, 0x01]);
+        let r = [&[7], &b"v9.27.1"[..], &[0x02, 0x01, 0x01, 0x01]].concat();
         assert_eq!(
             parse_info(&r).unwrap(),
-            HwwInfo {
+            FirmwareInfo {
                 version: Version::new(9, 27, 1),
                 product: Some(Product::BitBox02NovaBtcOnly),
                 unlocked: true,
                 initialized: Some(true),
             }
         );
+        let info = |rest: &[u8]| parse_info(&[&[6], &b"v9.1.0"[..], rest].concat());
         // Before 9.20.0 there is no initialized byte.
-        let mut r = vec![6];
-        r.extend_from_slice(b"v9.1.0");
-        r.extend_from_slice(&[0x00, 0x00, 0x00]);
-        let info = parse_info(&r).unwrap();
-        assert_eq!(info.product, Some(Product::BitBox02Multi));
-        assert_eq!(info.initialized, None);
-        assert!(!info.unlocked);
+        let i = info(&[0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(i.product, Some(Product::BitBox02Multi));
+        assert_eq!(i.initialized, None);
+        assert!(!i.unlocked);
         // Unknown platform.
-        let mut r = vec![6];
-        r.extend_from_slice(b"v9.1.0");
-        r.extend_from_slice(&[0x05, 0x00, 0x00]);
-        assert_eq!(parse_info(&r).unwrap().product, None);
+        assert_eq!(info(&[0x05, 0x00, 0x00]).unwrap().product, None);
         // Malformed.
+        assert!(info(&[0x00, 0x00, 0x03]).is_err());
+        assert!(info(&[0x00, 0x00]).is_err());
         assert!(parse_info(&[]).is_err());
         assert!(parse_info(&[10, b'v']).is_err());
-        let mut r = vec![6];
-        r.extend_from_slice(b"9.1.0x");
-        r.extend_from_slice(&[0x00, 0x00, 0x00]);
-        assert!(parse_info(&r).is_err());
-        let mut r = vec![6];
-        r.extend_from_slice(b"v9.1.0");
-        r.extend_from_slice(&[0x00, 0x00, 0x03]);
-        assert!(parse_info(&r).is_err());
+        assert!(parse_info(&[&[6], &b"9.1.0x"[..], &[0, 0, 0]].concat()).is_err());
     }
 
     #[test]
@@ -609,83 +500,47 @@ mod tests {
         assert_eq!(base32_encode(b"foob"), "MZXW6YQ=");
         assert_eq!(base32_encode(b"fooba"), "MZXW6YTB");
         assert_eq!(base32_encode(b"foobar"), "MZXW6YTBOI======");
-        let code = format_pairing_code(&[0u8; 32]);
-        assert_eq!(code, "AAAAA AAAAA\nAAAAA AAAAA");
-        let code = format_pairing_code(&[0xffu8; 32]);
-        assert_eq!(code, "77777 77777\n77777 77777");
+        assert_eq!(format_pairing_code(&[0xff; 32]), "77777 77777\n77777 77777");
     }
 
     #[test]
     fn protobuf() {
-        assert_eq!(proto::reboot_upgrade_request(), vec![0x92, 0x01, 0x00]);
-        assert_eq!(proto::device_info_request(), vec![0x22, 0x00]);
-
         // Response { success: Success {} }
         assert!(check_response_error(&[0x0a, 0x00]).is_ok());
         // Response { error: Error { code: 104, message: "aborted" } }
-        let mut err = vec![0x12, 11, 0x08, 104, 0x12, 7];
-        err.extend_from_slice(b"aborted");
+        let err = [&[0x12, 11, 0x08, 104, 0x12, 7], &b"aborted"[..]].concat();
         let e = check_response_error(&err).unwrap_err();
-        assert!(e.is_user_abort());
-        assert!(matches!(e, HwwError::Device { code: 104, ref message } if message == "aborted"));
-
-        // Response { device_info: { name: "My BitBox", initialized: true, version: "v9.27.1",
-        //   monotonic_increments_remaining: 300 (varint 0xac 0x02), securechip_model: "OPTIGA",
-        //   bootloader_version: "v1.2.2" } }
-        let mut inner = vec![0x0a, 9];
-        inner.extend_from_slice(b"My BitBox");
-        inner.extend_from_slice(&[0x10, 0x01, 0x1a, 7]);
-        inner.extend_from_slice(b"v9.27.1");
-        inner.extend_from_slice(&[0x28, 0xac, 0x02, 0x32, 6]);
-        inner.extend_from_slice(b"OPTIGA");
-        // An unknown optional message field 7 (bluetooth), must be skipped.
-        inner.extend_from_slice(&[0x3a, 2, 0x18, 0x01]);
-        inner.extend_from_slice(&[0x4a, 6]);
-        inner.extend_from_slice(b"v1.2.2");
-        let mut resp = vec![0x22, inner.len() as u8];
-        resp.extend_from_slice(&inner);
-        let info = proto::parse_device_info_response(&resp).unwrap();
-        assert_eq!(
-            info,
-            DeviceInfo {
-                name: "My BitBox".to_string(),
-                initialized: true,
-                version: "v9.27.1".to_string(),
-                mnemonic_passphrase_enabled: false,
-                monotonic_increments_remaining: 300,
-                securechip_model: "OPTIGA".to_string(),
-                bootloader_version: Some("v1.2.2".to_string()),
-            }
-        );
-        assert!(proto::parse_device_info_response(&[0x0a, 0x00]).is_err());
-        assert!(proto::fields(&[0x22, 0x05, 0x00]).is_err());
+        assert!(matches!(e, Error::Device(ref m) if m == "aborted by the user on the device"));
+        // Response { error: Error { code: 101 (varint 0x65), message: "invalid input" } }, after a
+        // fixed64 and a fixed32 fields that must be skipped.
+        let mut err = vec![0x09, 1, 2, 3, 4, 5, 6, 7, 8, 0x0d, 1, 2, 3, 4];
+        err.extend_from_slice(&[0x12, 17, 0x08, 0x65, 0x12, 13]);
+        err.extend_from_slice(b"invalid input");
+        let e = check_response_error(&err).unwrap_err();
+        assert_eq!(e.to_string(), "device returned error 101: invalid input");
+        assert!(check_response_error(&[0x22, 0x05, 0x00]).is_err());
     }
 
     #[test]
     fn noise_handshake_with_simulated_device() {
         // Check our use of the noise crates against a responder, as the device does (see
         // `bitbox02-firmware/src/rust/bitbox02-rust/src/hww/noise.rs`).
-        let host_key = X25519::genkey();
         let device_key = X25519::genkey();
         let device_pub = X25519::pubkey(&device_key);
-        let mut host = Handshake::new(
-            noise_protocol::patterns::noise_xx(),
-            true,
-            NOISE_PROLOGUE,
-            Some(host_key),
-            None,
-            None,
-            None,
-        );
-        let mut device = Handshake::new(
-            noise_protocol::patterns::noise_xx(),
-            false,
-            NOISE_PROLOGUE,
-            Some(device_key),
-            None,
-            None,
-            None,
-        );
+        let new = |initiator, key| {
+            let pattern = noise_protocol::patterns::noise_xx();
+            Handshake::new(
+                pattern,
+                initiator,
+                NOISE_PROLOGUE,
+                Some(key),
+                None,
+                None,
+                None,
+            )
+        };
+        let mut host = new(true, X25519::genkey());
+        let mut device = new(false, device_key);
         let m1 = host.write_message_vec(b"").unwrap();
         device.read_message_vec(&m1).unwrap();
         let m2 = device.write_message_vec(b"").unwrap();
@@ -697,7 +552,41 @@ mod tests {
         assert_eq!(host.get_hash(), device.get_hash());
         let (mut hs, _) = host.get_ciphers();
         let (mut dr, _) = device.get_ciphers();
-        let c = hs.encrypt_vec(&proto::reboot_upgrade_request());
-        assert_eq!(dr.decrypt_vec(&c).unwrap(), vec![0x92, 0x01, 0x00]);
+        let c = hs.encrypt_vec(REBOOT_UPGRADE_REQUEST);
+        assert_eq!(dr.decrypt_vec(&c).unwrap(), REBOOT_UPGRADE_REQUEST);
+    }
+
+    #[test]
+    fn config_roundtrip_and_compat() {
+        let dir = std::env::temp_dir().join(format!("bacca-noise-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let sub = dir.join("sub");
+        assert!(read_config(Some(&sub))
+            .unwrap()
+            .app_static_privkey
+            .is_none());
+        let data = NoiseConfigData {
+            app_static_privkey: Some([7; 32]),
+            device_static_pubkeys: vec![vec![1, 2, 3]],
+        };
+        store_config(Some(&sub), &data).unwrap();
+        let read = read_config(Some(&sub)).unwrap();
+        assert_eq!(read.app_static_privkey, Some([7; 32]));
+        assert_eq!(read.device_static_pubkeys, vec![vec![1, 2, 3]]);
+        let path = sub.join("bitbox.json");
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // Same JSON layout as bitbox-api's PersistedNoiseConfig (serde of the same struct).
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["device_static_pubkeys"],
+            serde_json::json!([[1, 2, 3]])
+        );
+        assert_eq!(json["app_static_privkey"].as_array().unwrap().len(), 32);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

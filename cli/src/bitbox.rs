@@ -3,8 +3,8 @@
 use std::{env, io::Write, path::PathBuf, process};
 
 use bitbox_manager::{
-    check_update, get_status, noise_config, update_firmware, DeviceStatus, Progress, UpdateOptions,
-    UpdateOutcome,
+    check_update, default_config_dir, get_status, reboot_bootloader, update_firmware, DeviceStatus,
+    Progress, UpdateOptions, UpdateOutcome,
 };
 
 // Print on stderr and exit with 1.
@@ -15,69 +15,27 @@ macro_rules! error {
     }};
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Command {
-    GetInfo,
-    CheckFirmware,
-    UpdateFirmware,
-    Reboot,
-}
-
-impl Command {
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "getinfo" => Some(Self::GetInfo),
-            "checkfirm" => Some(Self::CheckFirmware),
-            "updatefirm" => Some(Self::UpdateFirmware),
-            "reboot" => Some(Self::Reboot),
-            _ => None,
-        }
-    }
-}
-
 /// If `BITBOX_COMMAND` is set, run the BitBox command and return `true`.
 pub fn run_if_requested() -> bool {
-    let cmd_str = match env::var("BITBOX_COMMAND") {
+    let command = match env::var("BITBOX_COMMAND") {
         Ok(c) => c,
         Err(_) => return false,
     };
-    let command = match Command::from_str(&cmd_str) {
-        Some(c) => c,
-        None => error!(
+    match command.as_str() {
+        "getinfo" => print_info(),
+        "checkfirm" => check_firmware(),
+        "updatefirm" => update(),
+        // Leave the bootloader, clearing its "start in bootloader mode" flag.
+        "reboot" => match reboot_bootloader() {
+            Ok(()) => println!("Rebooted the device."),
+            Err(e) => error!("Error rebooting the device: {}.", e),
+        },
+        _ => error!(
             "Invalid BITBOX_COMMAND '{}'. Valid commands: getinfo, checkfirm, updatefirm, reboot.",
-            cmd_str
+            command
         ),
-    };
-    match command {
-        Command::GetInfo => print_info(),
-        Command::CheckFirmware => check_firmware(),
-        Command::UpdateFirmware => update(),
-        Command::Reboot => reboot(),
     }
     true
-}
-
-/// Leave the bootloader: reboot the device, clearing its "start in bootloader mode" flag.
-fn reboot() {
-    let api = match bitbox_manager::hidapi::HidApi::new() {
-        Ok(a) => a,
-        Err(e) => error!("Error initializing HID api: {}.", e),
-    };
-    let handle = match bitbox_manager::find_device(&api) {
-        Ok(h) => h,
-        Err(e) => error!("Error: {}.", e),
-    };
-    if handle.mode != bitbox_manager::Mode::Bootloader {
-        error!("The BitBox is not in bootloader mode.");
-    }
-    let bl = match bitbox_manager::open_bootloader(&api, &handle) {
-        Ok(b) => b,
-        Err(e) => error!("Error opening the bootloader: {}.", e),
-    };
-    if let Err(e) = bl.reboot() {
-        error!("Error rebooting the device: {}.", e);
-    }
-    println!("Rebooted the device.");
 }
 
 fn print_info() {
@@ -148,23 +106,19 @@ fn check_firmware() {
 }
 
 fn options() -> UpdateOptions {
-    let dir = env::var_os("BITBOX_CONFIG_DIR")
+    let config_dir = env::var_os("BITBOX_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(noise_config::default_config_dir);
-    let noise_config: Box<dyn noise_config::NoiseConfig + Send> = match dir {
-        Some(d) => Box::new(noise_config::PersistedNoiseConfig::new(d)),
-        None => {
-            eprintln!("Warning: no config directory, the pairing will not be remembered.");
-            Box::new(noise_config::NoiseConfigNoCache)
-        }
-    };
+        .or_else(default_config_dir);
+    if config_dir.is_none() {
+        eprintln!("Warning: no config directory, the pairing will not be remembered.");
+    }
     let show_firmware_hash = match env::var("BITBOX_SHOW_HASH").ok().as_deref() {
         None => None,
         Some("0") | Some("false") => Some(false),
         Some(_) => Some(true),
     };
     UpdateOptions {
-        noise_config,
+        config_dir,
         show_firmware_hash,
         force: env::var_os("BITBOX_FORCE").is_some(),
     }
