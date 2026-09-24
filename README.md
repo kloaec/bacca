@@ -81,10 +81,15 @@ device: allow the Ledger manager, check that the identifier (Ledger) or the pair
 firmware hash (BitBox) displayed on the device match the ones shown by the GUI, unlock the device,
 etc. Keep the device plugged in until the operation completes.
 
-After a Ledger firmware update the apps are removed from the device: the GUI refreshes the device
-information and offers to install the Bitcoin app again. If a Ledger firmware update was
-interrupted, run the GUI again: a Ledger in updater mode offers "Update" to finish it, and a Ledger
-in bootloader mode offers "Repair".
+A Ledger firmware update removes the apps from the device, and may reset its language and its
+custom lock screen picture. Like Ledger Live, Bacca backs them up before the update and restores
+them afterwards (see [Backup and restoration of the settings](#backup-and-restoration-of-the-settings)):
+at the end of the update the GUI shows what was restored. You will have to approve the backup and
+the restoration of the lock screen picture and of the language on the device. If the backup can't
+be saved to a file, the update is not started: you can retry, or update without a backup file (the
+backup is then only kept in memory). If a Ledger firmware update was interrupted, run the GUI
+again: a Ledger in updater mode offers "Update" to finish it (the settings backed up before the
+interrupted update are then restored), and a Ledger in bootloader mode offers "Repair".
 
 We plan on releasing binaries in the future.
 
@@ -103,21 +108,32 @@ For now those commands are implemented:
 - `updateapp`: update the Bitcoin app on your device
 - `openapp`: open the Bitcoin app on your device
 - `checkfirm`: show the current firmware version of your device and whether an update is available
-- `updatefirm`: update the firmware of your device to the latest version
+- `updatefirm`: update the firmware of your device to the latest version, backing up the device
+  settings before and restoring them after (see below)
 - `repairfirm`: repair the firmware of a device stuck in bootloader mode, for instance because a
   firmware update was interrupted while updating the MCU or the bootloader (like Ledger Live's
   "repair your device"). Set `LEDGER_REPAIR_VERSION` to force the first version to flash, as
   Ledger Live's repair options do (`0.7` if the device says "MCU outdated" or "MCU not genuine",
   `0.9` if it tells to follow the repair or update instructions)
+- `restorebackup`: restore the settings (apps, language, lock screen picture) from a backup made
+  by `updatefirm`, for instance if the restoration failed or the update was interrupted. Set
+  `LEDGER_BACKUP_FILE` to the backup file, by default the latest backup of the connected device
+  model is used
 
-Updating the firmware removes the applications installed on the device: reinstall the Bitcoin app
-with `installapp` afterwards. On Ledger Stax, Flex and Nano Gen5 the custom lock screen is not
-backed up (unlike with Ledger Live) and the language may have to be set again. Keep the device
-connected during the whole update, it may restart several times. If the update gets interrupted,
-run `updatefirm` again (device in updater mode) or `repairfirm` (device in bootloader mode) to
-complete it. During the update, the device must answer each command within 2 minutes (except
-when waiting for a confirmation on the device), otherwise the update fails with a timeout rather
-than hanging. Other operations (installing apps, genuine check) have no such timeout.
+Updating the firmware removes the applications installed on the device and may reset its language
+and lock screen picture: `updatefirm` backs them up before the update and restores them afterwards,
+and prints a report of what was restored (see [Backup and restoration of the
+settings](#backup-and-restoration-of-the-settings)). Set `LEDGER_NO_RESTORE` to update without
+backing up and restoring anything (reinstall the Bitcoin app with `installapp` afterwards). If
+the backup can't be saved to a file, the update is not started: set `LEDGER_BACKUP_DIR` to save it
+elsewhere, or `LEDGER_NO_BACKUP_FILE` to only keep it in memory. Keep the device connected during
+the whole update, it may restart several times. If the update gets interrupted, run `updatefirm`
+again (device in updater mode, the settings backed up before the interrupted update are then
+restored) or `repairfirm` (device in bootloader mode) to complete it, and `restorebackup` if the
+settings were not restored. During the update, the device must answer each command within 2
+minutes (except when waiting for a confirmation on the device), otherwise the update fails with a
+timeout rather than hanging. Other operations (installing apps, genuine check) have no such
+timeout.
 
 ### Examples
 
@@ -143,6 +159,11 @@ If the device is stuck in bootloader mode after an interrupted update:
 LEDGER_COMMAND=repairfirm cargo run -p ledger_manager_cli
 ```
 
+To restore the settings from a backup file:
+```
+LEDGER_COMMAND=restorebackup LEDGER_BACKUP_FILE=~/.config/bacca/ledger-backup-stax-33200004-20260924T110203Z.json cargo run -p ledger_manager_cli
+```
+
 #### Installing the Bitcoin Test app on your Ledger
 
 ```
@@ -153,6 +174,36 @@ Querying installed applications from your Ledger. You might have to confirm on y
 Querying Ledger's remote HSM to install the app. You might have to confirm the operation on your device.
 Successfully installed the app.
 ```
+
+### Backup and restoration of the settings
+
+Like Ledger Live, before a Ledger firmware update Bacca backs up:
+- the list of installed apps (all of them, not only the Bitcoin apps);
+- the language of the device (Nano X, Nano S Plus, Stax, Flex, Nano Gen5);
+- the custom lock screen picture (Stax, Flex, Nano Gen5). The device may ask you to approve its
+  backup. If you refuse, or if the backup fails, the update continues without it.
+
+After the update, it restores, in this order:
+- the language, by installing the language pack for the new firmware (unless it was English). You
+  have to approve it on the device;
+- the lock screen picture. You have to approve it, and to confirm the picture, on the device;
+- the apps, from the Ledger catalog for the new firmware (along with the apps they depend on). You
+  may have to allow the Ledger manager on the device. The apps which are not available anymore
+  for the new firmware are reported.
+
+Each part is restored independently: a failure of one doesn't prevent the others, and the report
+at the end tells what was restored, skipped or failed and why.
+
+The data stored inside the apps is **not** restored (neither by Ledger Live). In particular the
+wallet policies registered in the Bitcoin app (multisig, [Liana](https://github.com/wizardsardine/liana)
+wallets, ...) are lost: you may have to register your wallet again from your wallet software.
+
+Before the update starts, the backup is saved to a file in the config directory (`~/.config/bacca`
+on Linux, `~/Library/Application Support/bacca` on macOS, `%APPDATA%\bacca` on Windows), named
+like `ledger-backup-<model>-<target id>-<date>.json`. It contains the list of apps, the language
+id and the lock screen picture (hex-encoded). If the update is interrupted, nothing is lost: the
+backup is used when the update is resumed, and can be restored at any time with the
+`restorebackup` command of the CLI. The backup files are not deleted automatically.
 
 ## BitBox
 
