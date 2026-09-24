@@ -1,8 +1,8 @@
-//! Blocking interactions with a Ledger device. Run from `spawn_blocking` tasks, see
-//! `device_service`.
+//! The Ledger operations of the worker thread.
 
-use crate::device_service::{
-    DeviceState, LatestFirmware, LedgerMode, LedgerState, Reporter, TaskResult, Version,
+use crate::worker::{
+    AppState, DeviceState, Event, Installed, LatestFirmware, LedgerMode, LedgerState, Outcome,
+    Reporter,
 };
 
 use ledger_manager::{
@@ -15,84 +15,33 @@ use ledger_manager::{
     UpdateAndRestoreResult, UpdateAndRestoreStep, BITCOIN_APP_NAME, BITCOIN_TEST_APP_NAME,
 };
 
-use std::path::PathBuf;
+fn connect() -> Result<(TransportNativeHID, Option<DeviceModel>), String> {
+    let api = HidApi::new().map_err(|e| format!("Error initializing the HID API: {}", e))?;
+    open_device(&api).map_err(|e| format!("Cannot connect to the Ledger device: {}", e))
+}
 
-fn connect(reporter: &Reporter) -> Option<(TransportNativeHID, Option<DeviceModel>)> {
-    let res = HidApi::new()
-        .map_err(|e| e.to_string())
-        .and_then(|api| open_device(&api).map_err(|e| e.to_string()));
-    match res {
-        Ok(r) => Some(r),
+/// Query everything about the connected Ledger, reporting it to the GUI as it goes. Returns whether
+/// the device could be queried, and the firmware update available.
+pub fn load(r: &Reporter) -> (bool, Option<FirmwareUpdateInfo>) {
+    r.status("Ledger device detected, connecting...");
+    let (transport, usb_model) = match connect() {
+        Ok(t) => t,
         Err(e) => {
-            reporter.alarm(format!("Cannot connect to the Ledger device: {}", e));
-            None
-        }
-    }
-}
-
-fn percent(p: f32) -> u32 {
-    (p * 100.0).round().clamp(0.0, 100.0) as u32
-}
-
-/// Query the installed Bitcoin apps. The user may have to allow it on the device.
-fn installed_bitcoin_apps(transport: &TransportNativeHID) -> Result<(Version, Version), Error> {
-    let apps = list_installed_apps_raw(transport)?;
-    let main = apps.iter().find(|a| a.name == BITCOIN_APP_NAME);
-    let test = apps.iter().find(|a| a.name == BITCOIN_TEST_APP_NAME);
-    let hashes: Vec<Vec<u8>> = [main, test]
-        .iter()
-        .flatten()
-        .map(|a| a.hash.clone())
-        .collect();
-    // The versions are known from the Ledger API.
-    let infos = if hashes.is_empty() {
-        Vec::new()
-    } else {
-        apps_by_hashes(hashes).unwrap_or_else(|e| {
-            log::error!("Error querying the installed apps versions: {}", e);
-            Vec::new()
-        })
-    };
-    let version = |name: &str, installed: bool| {
-        if !installed {
-            return Version::NotInstalled;
-        }
-        infos
-            .iter()
-            .flatten()
-            .find(|i| i.version_name == name)
-            .map(|i| Version::Installed(i.version.clone()))
-            .unwrap_or_else(|| Version::Installed("unknown".to_string()))
-    };
-    Ok((
-        version(BITCOIN_APP_NAME, main.is_some()),
-        version(BITCOIN_TEST_APP_NAME, test.is_some()),
-    ))
-}
-
-/// Query everything about the connected Ledger: model, firmware, latest firmware, installed and
-/// latest Bitcoin apps. Returns whether the device could be queried, the state to display and the
-/// firmware update available.
-pub fn load(reporter: &Reporter) -> (bool, LedgerState, Option<FirmwareUpdateInfo>) {
-    log::info!("ledger::load()");
-    let mut state = LedgerState::default();
-    reporter.status("Ledger device detected, connecting...");
-    let (transport, usb_model) = match HidApi::new()
-        .map_err(|e| e.to_string())
-        .and_then(|api| open_device(&api).map_err(|e| e.to_string()))
-    {
-        Ok(r) => r,
-        Err(e) => {
-            reporter.status(format!("Cannot connect to the Ledger device: {}", e));
-            return (false, state, None);
+            r.status(e);
+            return (false, None);
         }
     };
-    state.model = usb_model.map(|m| m.to_string());
+    let mut state = LedgerState {
+        model: usb_model.map_or("Ledger".to_string(), |m| m.to_string()),
+        ..Default::default()
+    };
+    let send = |state: &LedgerState| r.device(DeviceState::Ledger(state.clone()));
 
     let info = match DeviceInfo::new(&transport) {
         Ok(info) => info,
         Err(e) => {
-            let msg = match e {
+            send(&state);
+            r.status(match e {
                 Error::DeviceLocked => "Your Ledger is locked, please unlock it...".to_string(),
                 Error::DeviceOnDashboardExpected => {
                     "Please quit the application opened on your Ledger...".to_string()
@@ -101,19 +50,16 @@ pub fn load(reporter: &Reporter) -> (bool, LedgerState, Option<FirmwareUpdateInf
                     "Your Ledger is not set up yet. Please set it up first.".to_string()
                 }
                 e => format!("Error fetching device info: {}. Is the Ledger unlocked?", e),
-            };
-            reporter.status(msg);
-            reporter.state(DeviceState::Ledger(Box::new(state.clone())));
-            return (false, state, None);
+            });
+            return (false, None);
         }
     };
     log::info!("Ledger connected: {}", info.firmware_summary());
-    state.model = Some(
-        info.model
-            .or(usb_model)
-            .map(|m| m.to_string())
-            .unwrap_or_else(|| format!("Unknown Ledger (target id {:#010x})", info.target_id)),
-    );
+    if let Some(model) = info.model.or(usb_model) {
+        state.model = model.to_string();
+    } else {
+        state.model = format!("Unknown Ledger (target id {:#010x})", info.target_id);
+    }
     state.mode = if info.is_bootloader {
         LedgerMode::Bootloader
     } else if info.is_osu {
@@ -126,19 +72,15 @@ pub fn load(reporter: &Reporter) -> (bool, LedgerState, Option<FirmwareUpdateInf
         LedgerMode::Updater => format!("{} (updater)", info.version),
         LedgerMode::Bootloader => format!("{} (bootloader)", info.version),
     });
-    reporter.state(DeviceState::Ledger(Box::new(state.clone())));
-
+    send(&state);
     if info.is_bootloader {
-        reporter.status(
-            "Your Ledger is in bootloader mode: a firmware update was probably interrupted. Click 'Repair' to finish it.",
-        );
-        return (true, state, None);
+        r.status("Your Ledger is in bootloader mode: a firmware update was probably interrupted. Click 'Repair' to finish it.");
+        return (true, None);
     }
 
-    // The final message, once everything is loaded.
+    // The messages to display once everything is loaded.
     let mut notes: Vec<String> = Vec::new();
-
-    reporter.status("Querying the latest firmware on Ledger API...");
+    r.status("Querying the latest firmware on Ledger API...");
     let update = match latest_firmware(&info) {
         Ok(Some(update)) => {
             let version = update.version().to_string();
@@ -158,364 +100,198 @@ pub fn load(reporter: &Reporter) -> (bool, LedgerState, Option<FirmwareUpdateInf
             None
         }
         Err(e) => {
-            log::error!("Error querying the latest firmware: {}", e);
             notes.push(format!("Could not check the latest firmware: {}", e));
             None
         }
     };
-    reporter.state(DeviceState::Ledger(Box::new(state.clone())));
-
+    send(&state);
     if info.is_osu {
-        reporter.status(
-            "A firmware update was interrupted, your Ledger is in updater mode. Click 'Update' to complete it.",
-        );
-        return (true, state, update);
+        r.status("A firmware update was interrupted, your Ledger is in updater mode. Click 'Update' to complete it.");
+        return (true, update);
     }
 
-    reporter.status("Querying latest apps on Ledger API...");
+    r.status("Querying latest apps on Ledger API...");
     match get_latest_apps(&info) {
         Ok((bitcoin, test)) => {
-            state.latest_mainnet = bitcoin
-                .map(|a| Version::Latest(a.version))
-                .unwrap_or(Version::None);
-            state.latest_testnet = test
-                .map(|a| Version::Latest(a.version))
-                .unwrap_or(Version::None);
+            state.bitcoin.latest = bitcoin.map(|a| a.version);
+            state.bitcoin_test.latest = test.map(|a| a.version);
         }
-        Err(e) => {
-            log::error!("Error querying the latest apps: {}", e);
-            notes.push(format!("Fail to get latest apps from Ledger API: {}", e));
+        Err(e) => notes.push(format!("Fail to get latest apps from Ledger API: {}", e)),
+    }
+    r.status("Querying installed apps. Please confirm on device.");
+    let res = installed_bitcoin_apps(&transport);
+    if let Ok((bitcoin, test)) = &res {
+        state.bitcoin.installed = bitcoin.clone();
+        state.bitcoin_test.installed = test.clone();
+    }
+    send(&state);
+    match res {
+        Err(e) => r.alarm(format!("Error listing installed applications: {}.", e)),
+        Ok(_) => {
+            let not_installed = |app: &AppState| app.installed == Installed::No;
+            if notes.is_empty()
+                && not_installed(&state.bitcoin)
+                && not_installed(&state.bitcoin_test)
+            {
+                notes.push(
+                    "The Bitcoin app is not installed. Click 'Install' to install it.".into(),
+                );
+            }
+            r.status(notes.join("\n"));
         }
     }
-
-    reporter.status("Querying installed apps. Please confirm on device.");
-    match installed_bitcoin_apps(&transport) {
-        Ok((main, test)) => {
-            state.mainnet = main;
-            state.testnet = test;
-        }
-        Err(e) => {
-            log::error!("Error listing installed applications: {}", e);
-            reporter.state(DeviceState::Ledger(Box::new(state.clone())));
-            reporter.alarm(format!("Error listing installed applications: {}.", e));
-            return (true, state, update);
-        }
-    }
-    reporter.state(DeviceState::Ledger(Box::new(state.clone())));
-
-    if notes.is_empty()
-        && state.mainnet == Version::NotInstalled
-        && state.testnet == Version::NotInstalled
-    {
-        notes.push("The Bitcoin app is not installed. Click 'Install' to install it.".to_string());
-    }
-    reporter.status(notes.join("\n"));
-    (true, state, update)
+    (true, update)
 }
 
-fn report_app_step(reporter: &Reporter, step: AppInstallStep) {
-    match step {
-        AppInstallStep::ListingApps => {
-            reporter.status("Querying installed apps. Please confirm on device.")
+/// Whether the Bitcoin and Bitcoin Test apps are installed. The user may have to allow it on the
+/// device.
+fn installed_bitcoin_apps(transport: &TransportNativeHID) -> Result<(Installed, Installed), Error> {
+    let apps = list_installed_apps_raw(transport)?;
+    let bitcoin = apps.iter().find(|a| a.name == BITCOIN_APP_NAME);
+    let test = apps.iter().find(|a| a.name == BITCOIN_TEST_APP_NAME);
+    // The Ledger API gives the versions of the apps from their hashes.
+    let hashes: Vec<Vec<u8>> = [bitcoin, test]
+        .iter()
+        .flatten()
+        .map(|a| a.hash.clone())
+        .collect();
+    let infos = if hashes.is_empty() {
+        Vec::new()
+    } else {
+        apps_by_hashes(hashes).unwrap_or_else(|e| {
+            log::error!("Error querying the installed apps versions: {}", e);
+            Vec::new()
+        })
+    };
+    let installed = |name: &str, found: bool| {
+        if !found {
+            return Installed::No;
         }
-        AppInstallStep::QueryingApi => reporter.status("Querying the Ledger API..."),
-        AppInstallStep::AllowManagerRequested => {
-            reporter.status("Please allow the Ledger manager on your device.")
-        }
-        AppInstallStep::AllowManagerGranted => reporter.status("Ledger manager allowed."),
-        AppInstallStep::Uninstalling { progress } => {
-            reporter.status(format!(
-                "Uninstalling the previous version: {}%",
-                percent(progress)
-            ));
-            reporter.progress(Some(progress));
-        }
-        AppInstallStep::Installing { progress, .. } => {
-            reporter.status(format!("Installing: {}%", percent(progress)));
-            reporter.progress(Some(progress));
-        }
-        AppInstallStep::Retrying { attempt, error } => {
-            reporter.progress(None);
-            reporter.status(format!(
-                "Error: {}. Retrying (attempt {})...",
-                error, attempt
-            ));
-        }
-        AppInstallStep::Done => reporter.progress(None),
-    }
+        let info = infos.iter().flatten().find(|i| i.version_name == name);
+        Installed::Version(info.map_or("unknown".to_string(), |i| i.version.clone()))
+    };
+    Ok((
+        installed(BITCOIN_APP_NAME, bitcoin.is_some()),
+        installed(BITCOIN_TEST_APP_NAME, test.is_some()),
+    ))
 }
 
-/// Install (or update, if `update` is set) the Bitcoin app.
-pub fn install_app(reporter: &Reporter, testnet: bool, update: bool) -> TaskResult {
-    log::info!(
-        "ledger::install_app(testnet={}, update={})",
-        testnet,
-        update
-    );
+/// Install (or update, if `update` is set) the Bitcoin (or Bitcoin Test) app.
+pub fn install_app(r: &Reporter, testnet: bool, update: bool) -> Outcome {
     let name = if testnet {
         BITCOIN_TEST_APP_NAME
     } else {
         BITCOIN_APP_NAME
     };
-    let (transport, _) = match connect(reporter) {
-        Some(t) => t,
-        None => {
-            return TaskResult::Operation {
-                reload: false,
-                message: None,
-            }
-        }
+    let (transport, _) = match connect() {
+        Ok(t) => t,
+        Err(e) => return Outcome::Failed(e),
     };
-    let progress = |step| report_app_step(reporter, step);
+    let progress = |step| report_app_step(r, step);
     let res = if update {
-        update_bitcoin_app(&transport, testnet, progress).map_err(|e| e.to_string())
+        update_bitcoin_app(&transport, testnet, progress)
     } else {
-        install_bitcoin_app(&transport, testnet, progress).map_err(|e| e.to_string())
+        install_bitcoin_app(&transport, testnet, progress)
     };
-    // Release the device before reloading its information.
-    drop(transport);
-    let message = match res {
-        Ok(()) => (
-            format!(
-                "Successfully {} the {} app.",
-                if update { "updated" } else { "installed" },
-                name
-            ),
-            false,
-        ),
-        Err(e) => (
-            format!(
-                "Error {} the {} app: {}",
-                if update { "updating" } else { "installing" },
-                name,
-                e
-            ),
-            true,
-        ),
-    };
-    TaskResult::Operation {
-        reload: true,
-        message: Some(message),
+    match (res, update) {
+        (Ok(()), false) => Outcome::Done(format!("Successfully installed the {} app.", name)),
+        (Ok(()), true) => Outcome::Done(format!("Successfully updated the {} app.", name)),
+        (Err(e), false) => Outcome::Failed(format!("Error installing the {} app: {}", name, e)),
+        (Err(e), true) => Outcome::Failed(format!("Error updating the {} app: {}", name, e)),
     }
 }
 
-/// Check the device is genuine.
-pub fn genuine_check(reporter: &Reporter) -> Option<bool> {
-    log::info!("ledger::genuine_check()");
-    let (transport, _) = connect(reporter)?;
-    reporter.status("Checking if the device is genuine...");
+pub fn genuine_check(r: &Reporter) -> Outcome {
+    let (transport, _) = match connect() {
+        Ok(t) => t,
+        Err(e) => {
+            r.alarm(e);
+            return Outcome::Reported;
+        }
+    };
+    r.status("Checking if the device is genuine...");
     let res = ledger_manager::genuine_check(&transport, |e| match e {
         SocketEvent::DevicePermissionRequested => {
-            reporter.status("Please allow the Ledger manager on your device.")
+            r.status("Please allow the Ledger manager on your device.")
         }
         SocketEvent::DevicePermissionGranted => {
-            reporter.status("Ledger manager allowed. Checking if the device is genuine...")
+            r.status("Ledger manager allowed. Checking if the device is genuine...")
         }
         _ => {}
     });
     match res {
         Ok(()) => {
-            reporter.status("");
-            Some(true)
+            r.send(Event::Genuine(true));
+            r.status("");
         }
         Err(Error::NotGenuine(_)) => {
-            reporter.alarm("WARNING: your device is NOT genuine!");
-            Some(false)
+            r.send(Event::Genuine(false));
+            r.alarm("WARNING: your device is NOT genuine!");
         }
-        Err(e) => {
-            reporter.alarm(format!("Error when performing the genuine check: {}", e));
-            None
-        }
+        Err(e) => r.alarm(format!("Error when performing the genuine check: {}", e)),
     }
+    Outcome::Reported
 }
 
-fn report_firmware_step(reporter: &Reporter, step: FirmwareUpdateStep) {
-    let progress = |label: &str, p: f32| {
-        reporter.status(format!("{}: {}%", label, percent(p)));
-        reporter.progress(Some(p));
+/// Update the firmware, backing up the device settings before and restoring them after. This
+/// takes minutes, the device restarts several times. With `backup_file`, the backup is saved to a
+/// file before the update starts, and the update is not started if it can't be saved.
+pub fn update_firmware(r: &Reporter, update: &FirmwareUpdateInfo, backup_file: bool) -> Outcome {
+    let backup_dir = match default_backup_dir() {
+        _ if !backup_file => None,
+        Some(dir) => Some(dir),
+        None => {
+            r.send(Event::BackupNotSaved(
+                "could not determine the configuration directory".to_string(),
+            ));
+            return Outcome::Reported;
+        }
     };
-    match step {
-        FirmwareUpdateStep::Preparing => reporter.status("Preparing the update..."),
-        FirmwareUpdateStep::AllowManagerRequested => {
-            reporter.status("Please allow the Ledger manager on your device.")
-        }
-        FirmwareUpdateStep::AllowManagerGranted => reporter.status("Ledger manager allowed."),
-        FirmwareUpdateStep::InstallingOsu { progress: p } => {
-            progress("Transferring the update to the device", p)
-        }
-        FirmwareUpdateStep::WaitingUserConfirmation { identifier } => {
-            reporter.progress(None);
-            match identifier {
-                Some(id) => {
-                    reporter.status(
-                        "Please confirm the update on your device, after checking the identifier it displays matches:",
-                    );
-                    reporter.info(Some(id));
-                }
-                None => reporter.status("Please confirm the update on your device."),
+    let mut backup_saved = false;
+    let res = HidApi::new().map_err(Error::from).and_then(|mut api| {
+        update_firmware_and_restore(&mut api, update, backup_dir.as_deref(), |step| {
+            if let UpdateAndRestoreStep::BackupSaved { .. }
+            | UpdateAndRestoreStep::BackupLoaded { .. } = step
+            {
+                backup_saved = true;
             }
+            report_update_step(r, step)
+        })
+    });
+    match res {
+        Ok(result) => update_result(&result),
+        Err(Error::BackupNotSaved(e)) => {
+            r.send(Event::BackupNotSaved(e));
+            Outcome::Reported
         }
-        FirmwareUpdateStep::UserConfirmed => {
-            reporter.info(None);
-            reporter.status("Update confirmed on the device.")
-        }
-        FirmwareUpdateStep::WaitingForReboot => {
-            reporter.progress(None);
-            reporter.status("Waiting for the device to restart. Keep it plugged in...")
-        }
-        FirmwareUpdateStep::WaitingForBootloader => {
-            reporter.progress(None);
-            reporter.status("Waiting for the device to restart in bootloader mode...")
-        }
-        FirmwareUpdateStep::FlashingBootloader { progress: p } => {
-            progress("Updating the bootloader", p)
-        }
-        FirmwareUpdateStep::FlashingMcu { progress: p } => progress("Updating the MCU", p),
-        FirmwareUpdateStep::InstallingFinal { progress: p } => {
-            progress("Installing the firmware", p)
-        }
-        FirmwareUpdateStep::WaitingForDevice => {
-            reporter.progress(None);
-            reporter.status(
-                "The device is installing the update. Waiting for it to restart on the new firmware, this can take several minutes. Keep it plugged in...",
-            )
-        }
-        FirmwareUpdateStep::DeviceLocked => {
-            reporter.status("Your device is locked: please unlock it to continue the update.")
-        }
-        FirmwareUpdateStep::Done { device_info } => {
-            reporter.progress(None);
-            reporter.status(format!(
-                "Firmware updated, the device now runs {}.",
-                device_info.version
-            ))
-        }
-    }
-}
-
-fn report_backup_step(reporter: &Reporter, step: BackupStep) {
-    match step {
-        BackupStep::ListingApps => reporter.status(
-            "Backing up the list of installed apps. Please allow the Ledger manager on your device if it asks for it.",
-        ),
-        BackupStep::FetchingLockScreen => {
-            reporter.progress(None);
-            reporter.status(
-                "Backing up the lock screen picture. Please approve the backup on your device if it asks for it.",
-            )
-        }
-        BackupStep::FetchingLockScreenProgress { progress } => {
-            reporter.status(format!(
-                "Backing up the lock screen picture: {}%",
-                percent(progress)
-            ));
-            reporter.progress(Some(progress));
-        }
-        BackupStep::Done => reporter.progress(None),
-    }
-}
-
-fn report_restore_step(reporter: &Reporter, step: RestoreStep) {
-    match step {
-        RestoreStep::InstallingLanguage { language } => {
-            reporter.progress(None);
-            reporter.status(format!(
-                "Restoring the language of your device ({})...",
-                language
-            ))
-        }
-        RestoreStep::Language(LanguageInstallStep::Downloading) => {
-            reporter.status("Downloading the language pack...")
-        }
-        RestoreStep::Language(LanguageInstallStep::PermissionRequested) => {
-            reporter.status("Please approve the language installation on your device.")
-        }
-        RestoreStep::Language(LanguageInstallStep::Installing { progress }) => {
-            reporter.status(format!("Installing the language: {}%", percent(progress)));
-            reporter.progress(Some(progress));
-        }
-        RestoreStep::RestoringLockScreen => {
-            reporter.progress(None);
-            reporter.status("Restoring the lock screen picture...")
-        }
-        RestoreStep::LockScreen(LoadImageStep::LoadPermissionRequested) => reporter
-            .status("Please approve the restoration of the lock screen picture on your device."),
-        RestoreStep::LockScreen(LoadImageStep::Loading { progress }) => {
-            reporter.status(format!(
-                "Restoring the lock screen picture: {}%",
-                percent(progress)
-            ));
-            reporter.progress(Some(progress));
-        }
-        RestoreStep::LockScreen(LoadImageStep::CommitPermissionRequested) => {
-            reporter.progress(None);
-            reporter.status("Please confirm the lock screen picture on your device.")
-        }
-        RestoreStep::ListingApps => {
-            reporter.progress(None);
-            reporter.status(
-                "Reinstalling the apps. Please allow the Ledger manager on your device if it asks for it.",
-            )
-        }
-        RestoreStep::InstallingApp { name, index, total } => {
-            reporter.progress(None);
-            reporter.status(format!("Reinstalling {} ({}/{})...", name, index, total))
-        }
-        RestoreStep::App(AppInstallStep::Installing { progress, .. }) => {
-            reporter.progress(Some(progress));
-        }
-        RestoreStep::App(step) => report_app_step(reporter, step),
-        RestoreStep::Done => reporter.progress(None),
-    }
-}
-
-fn report_update_step(reporter: &Reporter, step: UpdateAndRestoreStep) {
-    match step {
-        UpdateAndRestoreStep::Backup(step) => report_backup_step(reporter, step),
-        UpdateAndRestoreStep::BackupSaved { path } => reporter.status(format!(
-            "Backup of the device settings saved to {}.",
-            path.display()
+        Err(e) if backup_saved => Outcome::Failed(format!(
+            "Error updating the firmware: {}. The backup of the device settings is saved: complete the update ('Update' or 'Repair'), the settings are restored after it. If the device then runs the new firmware without having restored them, use the restorebackup command of the CLI.",
+            e
         )),
-        UpdateAndRestoreStep::BackupLoaded { path } => reporter.status(format!(
-            "Resuming the interrupted update. The settings will be restored from {}.",
-            path.display()
-        )),
-        UpdateAndRestoreStep::BackupSkipped { reason } => {
-            log::warn!("The device settings were not backed up: {}", reason)
-        }
-        UpdateAndRestoreStep::Firmware(step) => report_firmware_step(reporter, step),
-        UpdateAndRestoreStep::Restore(step) => report_restore_step(reporter, step),
+        Err(e) => Outcome::Failed(format!("Error updating the firmware: {}.", e)),
     }
 }
 
-/// The message to display at the end of the update, and whether it is an alarm (something could
-/// not be restored).
-fn update_result_message(
-    result: &UpdateAndRestoreResult,
-    backup_path: &Option<PathBuf>,
-) -> (String, bool) {
+/// The message at the end of the update. It is an error if something could not be restored.
+fn update_result(result: &UpdateAndRestoreResult) -> Outcome {
     let mut lines = vec![format!(
         "Successfully updated the firmware to {}.",
         result.device_info.version
     )];
-    let mut alarm = false;
+    let mut failed = false;
     let mut bitcoin_reinstalled = false;
     match (&result.report, &result.restore_error) {
         (Some(report), _) => {
             lines.push("Restoration of the device settings:".to_string());
             lines.extend(report.lines().into_iter().map(|l| format!("- {}", l)));
-            bitcoin_reinstalled = report
-                .reinstalled_apps()
-                .iter()
-                .any(|a| *a == BITCOIN_APP_NAME || *a == BITCOIN_TEST_APP_NAME);
-            if !report.is_complete() {
-                alarm = true;
-            }
+            // Only the Bitcoin apps are reinstalled.
+            bitcoin_reinstalled = !report.reinstalled_apps().is_empty();
+            failed = !report.is_complete();
         }
         (None, Some(e)) => {
-            alarm = true;
+            failed = true;
             lines.push(format!("The device settings could not be restored: {}", e));
-            if let Some(path) = backup_path {
+            if let Some(path) = &result.backup_path {
                 lines.push(format!(
                     "The backup is saved in {}, it can be restored with the CLI (restorebackup command).",
                     path.display()
@@ -527,97 +303,157 @@ fn update_result_message(
         ),
     }
     if bitcoin_reinstalled {
-        lines.push(
-            "The wallet policies registered in the Bitcoin app are not restored: you may have to register your wallet again from your wallet software.".to_string(),
-        );
+        lines.push("The wallet policies registered in the Bitcoin app are not restored: you may have to register your wallet again from your wallet software.".to_string());
     } else {
         lines.push("Click 'Install' to install the Bitcoin app if you need it.".to_string());
     }
-    (lines.join("\n"), alarm)
-}
-
-/// Update the firmware, backing up the device settings before and restoring them after. This
-/// takes minutes, the device restarts several times. If `save_backup` is set, the backup is saved
-/// to a file before starting the update, and the update is not started if it can't be saved.
-pub fn update_firmware(
-    reporter: &Reporter,
-    update: FirmwareUpdateInfo,
-    save_backup: bool,
-) -> TaskResult {
-    log::info!(
-        "ledger::update_firmware({}, save_backup={})",
-        update.version(),
-        save_backup
-    );
-    let backup_dir = if save_backup {
-        match default_backup_dir() {
-            Some(dir) => Some(dir),
-            None => {
-                return TaskResult::BackupNotSaved(
-                    "Could not determine the configuration directory to save the backup of the device settings.".to_string(),
-                )
-            }
-        }
+    let msg = lines.join("\n");
+    if failed {
+        Outcome::Failed(msg)
     } else {
-        None
-    };
-    let mut api = match HidApi::new() {
-        Ok(api) => api,
-        Err(e) => {
-            return TaskResult::Operation {
-                reload: true,
-                message: Some((format!("Error initializing HID api: {}.", e), true)),
-            }
-        }
-    };
-    let mut backup_path = None;
-    let res = update_firmware_and_restore(&mut api, &update, backup_dir.as_deref(), |step| {
-        if let UpdateAndRestoreStep::BackupSaved { path }
-        | UpdateAndRestoreStep::BackupLoaded { path } = &step
-        {
-            backup_path = Some(path.clone());
-        }
-        report_update_step(reporter, step)
-    });
-    let message = match res {
-        Ok(result) => update_result_message(&result, &backup_path),
-        Err(Error::BackupNotSaved(e)) => return TaskResult::BackupNotSaved(e),
-        Err(e) => {
-            let hint = if backup_path.is_some() {
-                " The backup of the device settings is saved: complete the update ('Update' or 'Repair'), the settings are restored after it. If the device then runs the new firmware without having restored them, use the restorebackup command of the CLI."
-            } else {
-                ""
-            };
-            (format!("Error updating the firmware: {}.{}", e, hint), true)
-        }
-    };
-    TaskResult::Operation {
-        reload: true,
-        message: Some(message),
+        Outcome::Done(msg)
     }
 }
 
-/// Finish a firmware update interrupted while the device was in bootloader mode, by flashing the
-/// MCU / bootloader it needs.
-pub fn repair_firmware(reporter: &Reporter) -> TaskResult {
-    log::info!("ledger::repair_firmware()");
-    let message = match HidApi::new() {
-        Err(e) => (format!("Error initializing HID api: {}.", e), true),
-        Ok(mut api) => match ledger_manager::repair_firmware(&mut api, None, |step| {
-            report_firmware_step(reporter, step)
-        }) {
-            Ok(info) => (
-                format!(
-                    "Successfully repaired the device, it now runs {}.",
-                    info.version
-                ),
-                false,
-            ),
-            Err(e) => (format!("Error repairing the firmware: {}", e), true),
-        },
-    };
-    TaskResult::Operation {
-        reload: true,
-        message: Some(message),
+/// Finish a firmware update interrupted while the device was in bootloader mode.
+pub fn repair_firmware(r: &Reporter) -> Outcome {
+    let res = HidApi::new().map_err(Error::from).and_then(|mut api| {
+        ledger_manager::repair_firmware(&mut api, None, |step| report_firmware_step(r, step))
+    });
+    match res {
+        Ok(info) => Outcome::Done(format!(
+            "Successfully repaired the device, it now runs {}.",
+            info.version
+        )),
+        Err(e) => Outcome::Failed(format!("Error repairing the firmware: {}", e)),
+    }
+}
+
+fn report_app_step(r: &Reporter, step: AppInstallStep) {
+    match step {
+        AppInstallStep::ListingApps => {
+            r.status("Querying installed apps. Please confirm on device.")
+        }
+        AppInstallStep::QueryingApi => r.status("Querying the Ledger API..."),
+        AppInstallStep::AllowManagerRequested => {
+            r.status("Please allow the Ledger manager on your device.")
+        }
+        AppInstallStep::AllowManagerGranted => r.status("Ledger manager allowed."),
+        AppInstallStep::Uninstalling { progress } => {
+            r.percent("Uninstalling the previous version", progress)
+        }
+        AppInstallStep::Installing { progress } => r.percent("Installing", progress),
+        AppInstallStep::Retrying { attempt, error } => r.status(format!(
+            "Error: {}. Retrying (attempt {})...",
+            error, attempt
+        )),
+        AppInstallStep::Done => r.send(Event::Progress(None)),
+    }
+}
+
+fn report_firmware_step(r: &Reporter, step: FirmwareUpdateStep) {
+    match step {
+        FirmwareUpdateStep::Preparing => r.status("Preparing the update..."),
+        FirmwareUpdateStep::AllowManagerRequested => {
+            r.status("Please allow the Ledger manager on your device.")
+        }
+        FirmwareUpdateStep::AllowManagerGranted => r.status("Ledger manager allowed."),
+        FirmwareUpdateStep::InstallingOsu { progress } => {
+            r.percent("Transferring the update to the device", progress)
+        }
+        FirmwareUpdateStep::WaitingUserConfirmation { identifier: Some(id) } => {
+            r.status("Please confirm the update on your device, after checking the identifier it displays matches:");
+            r.info(Some(id));
+        }
+        FirmwareUpdateStep::WaitingUserConfirmation { identifier: None } => {
+            r.status("Please confirm the update on your device.")
+        }
+        FirmwareUpdateStep::UserConfirmed => {
+            r.info(None);
+            r.status("Update confirmed on the device.")
+        }
+        FirmwareUpdateStep::WaitingForReboot => {
+            r.status("Waiting for the device to restart. Keep it plugged in...")
+        }
+        FirmwareUpdateStep::WaitingForBootloader => {
+            r.status("Waiting for the device to restart in bootloader mode...")
+        }
+        FirmwareUpdateStep::FlashingBootloader { progress } => {
+            r.percent("Updating the bootloader", progress)
+        }
+        FirmwareUpdateStep::FlashingMcu { progress } => r.percent("Updating the MCU", progress),
+        FirmwareUpdateStep::InstallingFinal { progress } => {
+            r.percent("Installing the firmware", progress)
+        }
+        FirmwareUpdateStep::WaitingForDevice => r.status("The device is installing the update. Waiting for it to restart on the new firmware, this can take several minutes. Keep it plugged in..."),
+        FirmwareUpdateStep::DeviceLocked => {
+            r.status("Your device is locked: please unlock it to continue the update.")
+        }
+        FirmwareUpdateStep::Done { device_info } => r.status(format!(
+            "Firmware updated, the device now runs {}.",
+            device_info.version
+        )),
+    }
+}
+
+fn report_update_step(r: &Reporter, step: UpdateAndRestoreStep) {
+    match step {
+        UpdateAndRestoreStep::Backup(BackupStep::ListingApps) => r.status("Backing up the list of installed apps. Please allow the Ledger manager on your device if it asks for it."),
+        UpdateAndRestoreStep::Backup(BackupStep::FetchingLockScreen) => r.status("Backing up the lock screen picture. Please approve the backup on your device if it asks for it."),
+        UpdateAndRestoreStep::Backup(BackupStep::FetchingLockScreenProgress { progress }) => {
+            r.percent("Backing up the lock screen picture", progress)
+        }
+        UpdateAndRestoreStep::Backup(BackupStep::Done) => r.send(Event::Progress(None)),
+        UpdateAndRestoreStep::BackupSaved { path } => r.status(format!(
+            "Backup of the device settings saved to {}.",
+            path.display()
+        )),
+        UpdateAndRestoreStep::BackupLoaded { path } => r.status(format!(
+            "Resuming the interrupted update. The settings will be restored from {}.",
+            path.display()
+        )),
+        UpdateAndRestoreStep::BackupSkipped { reason } => {
+            log::warn!("The device settings were not backed up: {}", reason)
+        }
+        UpdateAndRestoreStep::Firmware(step) => report_firmware_step(r, step),
+        UpdateAndRestoreStep::Restore(step) => report_restore_step(r, step),
+    }
+}
+
+fn report_restore_step(r: &Reporter, step: RestoreStep) {
+    match step {
+        RestoreStep::InstallingLanguage { language } => r.status(format!(
+            "Restoring the language of your device ({})...",
+            language
+        )),
+        RestoreStep::Language(LanguageInstallStep::Downloading) => {
+            r.status("Downloading the language pack...")
+        }
+        RestoreStep::Language(LanguageInstallStep::PermissionRequested) => {
+            r.status("Please approve the language installation on your device.")
+        }
+        RestoreStep::Language(LanguageInstallStep::Installing { progress }) => {
+            r.percent("Installing the language", progress)
+        }
+        RestoreStep::RestoringLockScreen => r.status("Restoring the lock screen picture..."),
+        RestoreStep::LockScreen(LoadImageStep::LoadPermissionRequested) => {
+            r.status("Please approve the restoration of the lock screen picture on your device.")
+        }
+        RestoreStep::LockScreen(LoadImageStep::Loading { progress }) => {
+            r.percent("Restoring the lock screen picture", progress)
+        }
+        RestoreStep::LockScreen(LoadImageStep::CommitPermissionRequested) => {
+            r.status("Please confirm the lock screen picture on your device.")
+        }
+        RestoreStep::ListingApps => r.status("Reinstalling the apps. Please allow the Ledger manager on your device if it asks for it."),
+        RestoreStep::InstallingApp { name, index, total } => {
+            r.status(format!("Reinstalling {} ({}/{})...", name, index, total))
+        }
+        // Keep the "Reinstalling" message.
+        RestoreStep::App(AppInstallStep::Installing { progress }) => {
+            r.send(Event::Progress(Some(progress)))
+        }
+        RestoreStep::App(step) => report_app_step(r, step),
+        RestoreStep::Done => r.send(Event::Progress(None)),
     }
 }
