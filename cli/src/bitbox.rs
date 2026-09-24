@@ -1,46 +1,34 @@
 //! BitBox02 commands, selected with the `BITBOX_COMMAND` env var.
 
-use std::{env, io::Write, path::PathBuf, process};
+use std::{env, io::Write, path::PathBuf};
 
 use bitbox_manager::{
     check_update, default_config_dir, get_status, reboot_bootloader, update_firmware, DeviceStatus,
     Progress, UpdateOptions, UpdateOutcome,
 };
 
-// Print on stderr and exit with 1.
-macro_rules! error {
-    ($($arg:tt)*) => {{
-        eprintln!($($arg)*);
-        process::exit(1);
-    }};
-}
+use crate::OrExit;
 
-/// If `BITBOX_COMMAND` is set, run the BitBox command and return `true`.
-pub fn run_if_requested() -> bool {
-    let command = match env::var("BITBOX_COMMAND") {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    match command.as_str() {
+pub fn run(command: &str) {
+    match command {
         "getinfo" => print_info(),
         "checkfirm" => check_firmware(),
         "updatefirm" => update(),
         // Leave the bootloader, clearing its "start in bootloader mode" flag.
-        "reboot" => match reboot_bootloader() {
-            Ok(()) => println!("Rebooted the device."),
-            Err(e) => error!("Error rebooting the device: {}.", e),
-        },
-        _ => error!(
+        "reboot" => {
+            reboot_bootloader().or_exit("Error rebooting the device");
+            println!("Rebooted the device.");
+        }
+        _ => fail!(
             "Invalid BITBOX_COMMAND '{}'. Valid commands: getinfo, checkfirm, updatefirm, reboot.",
             command
         ),
     }
-    true
 }
 
 fn print_info() {
-    match get_status() {
-        Ok(DeviceStatus::Firmware(info)) => {
+    match get_status().or_exit("Error getting the device info") {
+        DeviceStatus::Firmware(info) => {
             println!("BitBox02 in firmware mode:");
             match info.product {
                 Some(p) => println!("  - Product: {} ({} edition)", p.platform(), p.edition()),
@@ -53,7 +41,7 @@ fn print_info() {
             }
             println!("  - Unlocked: {}", info.unlocked);
         }
-        Ok(DeviceStatus::Bootloader(info)) => {
+        DeviceStatus::Bootloader(info) => {
             println!("BitBox02 in bootloader mode:");
             println!(
                 "  - Product: {} ({} edition)",
@@ -76,15 +64,11 @@ fn print_info() {
                 info.show_firmware_hash_on_boot
             );
         }
-        Err(e) => error!("Error getting device info: {}", e),
     }
 }
 
 fn check_firmware() {
-    let check = match check_update() {
-        Ok(c) => c,
-        Err(e) => error!("Error checking the latest firmware: {}", e),
-    };
+    let check = check_update().or_exit("Error checking the latest firmware");
     let product = check.status.product().expect("checked by check_update");
     println!(
         "Latest firmware for {}: v{} ({})",
@@ -177,30 +161,30 @@ fn print_progress(p: Progress) {
 }
 
 fn update() {
-    let options = options();
-    match update_firmware(&options, &mut print_progress) {
-        Ok(UpdateOutcome::AlreadyUpToDate { installed, latest }) => println!(
+    let outcome =
+        update_firmware(&options(), &mut print_progress).or_exit("Error updating the firmware");
+    match outcome {
+        UpdateOutcome::AlreadyUpToDate { installed, latest } => println!(
             "The firmware is already up to date (installed v{}, latest v{}). Set BITBOX_FORCE to reinstall.",
             installed, latest
         ),
-        Ok(UpdateOutcome::AlreadyInstalled {
+        UpdateOutcome::AlreadyInstalled {
             firmware_version,
             sighash,
-        }) => println!(
+        } => println!(
             "This firmware (monotonic version {}, hash {}) is already installed, the device was \
              rebooted. Set BITBOX_FORCE to reinstall.",
             firmware_version,
             hex::encode(sighash)
         ),
-        Ok(UpdateOutcome::Updated {
+        UpdateOutcome::Updated {
             product,
             version,
             sighash,
             ..
-        }) => {
+        } => {
             println!("Successfully installed firmware v{} on your {}.", version, product);
             println!("Firmware hash: {}", hex::encode(sighash));
         }
-        Err(e) => error!("Error updating the firmware: {}", e),
     }
 }
