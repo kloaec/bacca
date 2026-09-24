@@ -3,9 +3,8 @@
 use std::{env, io::Write, path::PathBuf, process};
 
 use bitbox_manager::{
-    check_update, get_status, noise_config, read_firmware_file,
-    signed_firmware::{SighashScheme, SignedFirmware},
-    update_firmware, DeviceStatus, FirmwareSource, Progress, UpdateOptions, UpdateOutcome,
+    check_update, get_status, noise_config, update_firmware, DeviceStatus, Progress, UpdateOptions,
+    UpdateOutcome,
 };
 
 // Print on stderr and exit with 1.
@@ -21,8 +20,6 @@ enum Command {
     GetInfo,
     CheckFirmware,
     UpdateFirmware,
-    FlashFile,
-    HashFile,
     Reboot,
 }
 
@@ -32,8 +29,6 @@ impl Command {
             "getinfo" => Some(Self::GetInfo),
             "checkfirm" => Some(Self::CheckFirmware),
             "updatefirm" => Some(Self::UpdateFirmware),
-            "flashfile" => Some(Self::FlashFile),
-            "hashfile" => Some(Self::HashFile),
             "reboot" => Some(Self::Reboot),
             _ => None,
         }
@@ -49,21 +44,14 @@ pub fn run_if_requested() -> bool {
     let command = match Command::from_str(&cmd_str) {
         Some(c) => c,
         None => error!(
-            "Invalid BITBOX_COMMAND '{}'. Valid commands: getinfo, checkfirm, updatefirm, \
-             flashfile (with BITBOX_FIRMWARE_FILE), hashfile (with BITBOX_FIRMWARE_FILE), reboot.",
+            "Invalid BITBOX_COMMAND '{}'. Valid commands: getinfo, checkfirm, updatefirm, reboot.",
             cmd_str
         ),
     };
     match command {
         Command::GetInfo => print_info(),
         Command::CheckFirmware => check_firmware(),
-        Command::UpdateFirmware => update(FirmwareSource::Latest),
-        Command::FlashFile => {
-            let fw = firmware_file();
-            describe_firmware(&fw);
-            update(FirmwareSource::File(fw))
-        }
-        Command::HashFile => describe_firmware(&firmware_file()),
+        Command::UpdateFirmware => update(),
         Command::Reboot => reboot(),
     }
     true
@@ -90,38 +78,6 @@ fn reboot() {
         error!("Error rebooting the device: {}.", e);
     }
     println!("Rebooted the device.");
-}
-
-fn firmware_file() -> SignedFirmware {
-    let path = match env::var_os("BITBOX_FIRMWARE_FILE") {
-        Some(p) => PathBuf::from(p),
-        None => error!("BITBOX_FIRMWARE_FILE must be set to the path of a signed firmware file."),
-    };
-    match read_firmware_file(&path) {
-        Ok(fw) => fw,
-        Err(e) => error!("Error reading firmware file {}: {}", path.display(), e),
-    }
-}
-
-fn describe_firmware(fw: &SignedFirmware) {
-    println!("Firmware file:");
-    println!("  - Product: {}", fw.product());
-    println!("  - Monotonic firmware version: {}", fw.firmware_version());
-    println!("  - Signing keys version: {}", fw.signing_pubkeys_version());
-    println!(
-        "  - sha256 of the unsigned binary (compare with the reproducible builds): {}",
-        hex::encode(fw.unsigned_hash())
-    );
-    println!(
-        "  - Firmware hash as shown by the device and in the release notes: {}",
-        hex::encode(fw.published_sighash())
-    );
-    if SighashScheme::for_firmware_version(fw.firmware_version()) == SighashScheme::ProductId {
-        println!(
-            "    (bootloaders older than v1.2.0 show instead: {})",
-            hex::encode(fw.sighash(SighashScheme::Legacy))
-        );
-    }
 }
 
 fn print_info() {
@@ -240,15 +196,12 @@ fn print_progress(p: Progress) {
             sighash,
             intermediate,
         } => {
-            match version {
-                Some(v) => println!(
-                    "Installing {}firmware v{} (monotonic version {}).",
-                    if intermediate { "intermediate " } else { "" },
-                    v,
-                    firmware_version
-                ),
-                None => println!("Installing firmware (monotonic version {}).", firmware_version),
-            }
+            println!(
+                "Installing {}firmware v{} (monotonic version {}).",
+                if intermediate { "intermediate " } else { "" },
+                version,
+                firmware_version
+            );
             println!("Firmware hash: {}", hex::encode(sighash));
         }
         Progress::Erasing => println!("Erasing..."),
@@ -269,9 +222,9 @@ fn print_progress(p: Progress) {
     }
 }
 
-fn update(source: FirmwareSource) {
+fn update() {
     let options = options();
-    match update_firmware(source, &options, &mut print_progress) {
+    match update_firmware(&options, &mut print_progress) {
         Ok(UpdateOutcome::AlreadyUpToDate { installed, latest }) => println!(
             "The firmware is already up to date (installed v{}, latest v{}). Set BITBOX_FORCE to reinstall.",
             installed, latest
@@ -288,16 +241,10 @@ fn update(source: FirmwareSource) {
         Ok(UpdateOutcome::Updated {
             product,
             version,
-            firmware_version,
             sighash,
+            ..
         }) => {
-            match version {
-                Some(v) => println!("Successfully installed firmware v{} on your {}.", v, product),
-                None => println!(
-                    "Successfully installed firmware (monotonic version {}) on your {}.",
-                    firmware_version, product
-                ),
-            }
+            println!("Successfully installed firmware v{} on your {}.", version, product);
             println!("Firmware hash: {}", hex::encode(sighash));
         }
         Err(e) => error!("Error updating the firmware: {}", e),

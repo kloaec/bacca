@@ -55,7 +55,6 @@ pub enum Error {
     Bootloader(BootloaderError),
     Release(ReleaseError),
     InvalidFirmware(FirmwareFormatError),
-    Io(std::io::Error),
     /// The device reported an unknown product.
     UnknownProduct,
     /// The firmware is not for this device's product (platform or edition).
@@ -113,7 +112,6 @@ impl fmt::Display for Error {
             Self::Bootloader(e) => write!(f, "{}", e),
             Self::Release(e) => write!(f, "{}", e),
             Self::InvalidFirmware(e) => write!(f, "invalid firmware: {}", e),
-            Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::UnknownProduct => write!(f, "unknown BitBox product"),
             Self::WrongProduct { device, firmware } => write!(
                 f,
@@ -195,11 +193,6 @@ impl From<ReleaseError> for Error {
 impl From<FirmwareFormatError> for Error {
     fn from(e: FirmwareFormatError) -> Self {
         Error::InvalidFirmware(e)
-    }
-}
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Io(e)
     }
 }
 
@@ -429,12 +422,6 @@ pub fn check_flashable(
     Ok(())
 }
 
-/// Read and validate a signed firmware file.
-pub fn read_firmware_file(path: impl AsRef<std::path::Path>) -> Result<SignedFirmware, Error> {
-    let data = std::fs::read(path)?;
-    Ok(SignedFirmware::parse(&data)?)
-}
-
 /// Progress of a firmware update, for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
@@ -455,10 +442,10 @@ pub enum Progress {
     WaitingRebootConfirmation,
     /// Waiting for the device to appear in bootloader mode.
     WaitingForBootloader,
-    /// About to install a firmware. `version` is `None` for a local file. `sighash` is the
-    /// firmware hash the device shows on boot if enabled, and published in the release notes.
+    /// About to install a firmware. `sighash` is the firmware hash the device shows on boot if
+    /// enabled, and published in the release notes.
     Installing {
-        version: Option<Version>,
+        version: Version,
         firmware_version: u32,
         sighash: [u8; 32],
         intermediate: bool,
@@ -479,15 +466,6 @@ pub enum Progress {
         version: Version,
     },
     Done,
-}
-
-/// Which firmware to install.
-#[derive(Debug, Clone)]
-pub enum FirmwareSource {
-    /// The latest official release for the device's product, from GitHub.
-    Latest,
-    /// A local signed firmware (e.g. from [`read_firmware_file`]).
-    File(SignedFirmware),
 }
 
 pub struct UpdateOptions {
@@ -521,7 +499,7 @@ pub enum UpdateOutcome {
     },
     Updated {
         product: Product,
-        version: Option<Version>,
+        version: Version,
         firmware_version: u32,
         sighash: [u8; 32],
     },
@@ -530,7 +508,7 @@ pub enum UpdateOutcome {
 /// The firmware to install, and its marketing version if known.
 struct Target {
     firmware: SignedFirmware,
-    version: Option<Version>,
+    version: Version,
 }
 
 fn download_latest(
@@ -547,13 +525,12 @@ fn download_latest(
     Ok((release, firmware))
 }
 
-/// Update the firmware of the connected BitBox02 (in firmware or bootloader mode) to the given
-/// source, performing required intermediate upgrades. Blocking; see the crate documentation.
+/// Update the firmware of the connected BitBox02 (in firmware or bootloader mode) to the latest
+/// release, performing required intermediate upgrades. Blocking; see the crate documentation.
 ///
 /// In firmware mode, the user has to unlock the device, possibly confirm the pairing code, and
 /// confirm the reboot into the bootloader.
 pub fn update_firmware(
-    source: FirmwareSource,
     options: &UpdateOptions,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<UpdateOutcome, Error> {
@@ -562,46 +539,30 @@ pub fn update_firmware(
     let product = handle.product;
 
     // Resolve and validate the target firmware before touching the device.
-    let target = match source {
-        FirmwareSource::File(firmware) => {
-            if firmware.product() != product {
-                return Err(Error::WrongProduct {
-                    device: product,
-                    firmware: firmware.product(),
-                });
-            }
-            Target {
-                firmware,
-                version: None,
-            }
+    let target = if handle.mode == Mode::Firmware && !options.force {
+        // Avoid downloading if already up to date.
+        let info = open_firmware(&api, &handle)?.info().clone();
+        progress(Progress::FetchingReleases);
+        let release = releases::latest_release(product)?;
+        if release.version <= info.version {
+            return Ok(UpdateOutcome::AlreadyUpToDate {
+                installed: info.version,
+                latest: release.version,
+            });
         }
-        FirmwareSource::Latest => {
-            if handle.mode == Mode::Firmware && !options.force {
-                // Avoid downloading if already up to date.
-                let info = open_firmware(&api, &handle)?.info().clone();
-                progress(Progress::FetchingReleases);
-                let release = releases::latest_release(product)?;
-                if release.version <= info.version {
-                    return Ok(UpdateOutcome::AlreadyUpToDate {
-                        installed: info.version,
-                        latest: release.version,
-                    });
-                }
-                progress(Progress::Downloading {
-                    version: release.version,
-                    intermediate: false,
-                });
-                Target {
-                    firmware: releases::download(&release)?,
-                    version: Some(release.version),
-                }
-            } else {
-                let (release, firmware) = download_latest(product, progress)?;
-                Target {
-                    firmware,
-                    version: Some(release.version),
-                }
-            }
+        progress(Progress::Downloading {
+            version: release.version,
+            intermediate: false,
+        });
+        Target {
+            firmware: releases::download(&release)?,
+            version: release.version,
+        }
+    } else {
+        let (release, firmware) = download_latest(product, progress)?;
+        Target {
+            firmware,
+            version: release.version,
         }
     };
 
@@ -688,7 +649,7 @@ pub fn update_firmware(
                     Ok(fw) => fw,
                     Err(e) => return Err(reboot_on_error(bl, e)),
                 };
-                flash(&bl, &firmware, Some(i.version), true, progress)?;
+                flash(&bl, &firmware, i.version, true, progress)?;
                 booted.push(i.monotonic_version);
                 progress(Progress::Rebooting);
                 bl.reboot()?;
@@ -754,7 +715,7 @@ fn reboot_on_error(bl: Bootloader, e: Error) -> Error {
 fn flash(
     bl: &Bootloader,
     firmware: &SignedFirmware,
-    version: Option<Version>,
+    version: Version,
     intermediate: bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<[u8; 32], Error> {

@@ -6,8 +6,8 @@ use crate::device_service::{BitboxState, DeviceState, LatestFirmware, Reporter, 
 use bitbox_manager::{
     check_update, get_status,
     noise_config::{default_config_dir, NoiseConfig, NoiseConfigNoCache, PersistedNoiseConfig},
-    update_firmware, DeviceHandle, DeviceStatus, FirmwareSource, Mode, Product, Progress,
-    UpdateOptions, UpdateOutcome,
+    update_firmware, DeviceHandle, DeviceStatus, Mode, Product, Progress, UpdateOptions,
+    UpdateOutcome,
 };
 
 /// Format a firmware hash in groups of 8 hex characters, easier to compare with the device's
@@ -132,21 +132,15 @@ fn report_progress(reporter: &Reporter, progress: Progress) {
         }
         Progress::Installing {
             version,
-            firmware_version,
             sighash,
             intermediate: i,
+            ..
         } => {
-            reporter.status(match version {
-                Some(v) => format!(
-                    "Installing the {}firmware v{}. Firmware hash, to compare with the one shown by your BitBox (if enabled) and in the release notes:",
-                    intermediate(i),
-                    v
-                ),
-                None => format!(
-                    "Installing the firmware (monotonic version {}). Firmware hash:",
-                    firmware_version
-                ),
-            });
+            reporter.status(format!(
+                "Installing the {}firmware v{}. Firmware hash, to compare with the one shown by your BitBox (if enabled) and in the release notes:",
+                intermediate(i),
+                version
+            ));
             reporter.info(Some(format_hash(&sighash)));
         }
         Progress::Erasing => reporter.status("Erasing the previous firmware..."),
@@ -192,9 +186,7 @@ pub fn update(reporter: &Reporter) -> TaskResult {
         noise_config,
         ..Default::default()
     };
-    let res = update_firmware(FirmwareSource::Latest, &options, &mut |p| {
-        report_progress(reporter, p)
-    });
+    let res = update_firmware(&options, &mut |p| report_progress(reporter, p));
     let message = match res {
         Ok(UpdateOutcome::AlreadyUpToDate { installed, .. }) => (
             format!("The firmware is already up to date (v{}).", installed),
@@ -214,8 +206,8 @@ pub fn update(reporter: &Reporter) -> TaskResult {
             ..
         }) => (
             format!(
-                "Successfully installed the firmware{} on your {}. Firmware hash, to compare with the one shown by your BitBox (if enabled): {}",
-                version.map(|v| format!(" v{}", v)).unwrap_or_default(),
+                "Successfully installed the firmware v{} on your {}. Firmware hash, to compare with the one shown by your BitBox (if enabled): {}",
+                version,
                 product,
                 format_hash(&sighash)
             ),

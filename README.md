@@ -248,8 +248,6 @@ The BitBox commands are passed through the `BITBOX_COMMAND` environment variable
 - `checkfirm`: check the latest firmware release available for your device
 - `updatefirm`: update your device to the latest firmware release (also installs a firmware on a
   device in bootloader mode without firmware)
-- `flashfile`: flash the signed firmware file at `BITBOX_FIRMWARE_FILE`
-- `hashfile`: show information and the hash of the signed firmware file at `BITBOX_FIRMWARE_FILE`
 
 Optional: set `BITBOX_SHOW_HASH=1` (or `0`) to make the device show (or not) the firmware hash on
 every boot, `BITBOX_FORCE` to reinstall the same firmware. `BITBOX_COMMAND=reboot` makes a device in
