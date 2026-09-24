@@ -6,15 +6,13 @@ use crate::device_service::{
 };
 
 use ledger_manager::{
-    bitcoin_apps_by_hashes, check_firmware_update_supported, default_backup_dir,
-    firmware_update_resets_customization, genuine_check_with_events, get_latest_apps,
-    install_bitcoin_app_with_progress, latest_firmware,
+    apps_by_hashes, check_firmware_update_supported, default_backup_dir,
+    firmware_update_resets_customization, get_latest_apps, install_bitcoin_app, latest_firmware,
     ledger_transport_hidapi::{hidapi::HidApi, TransportNativeHID},
-    list_installed_apps_raw, open_device, update_bitcoin_app_with_progress,
-    update_firmware_and_restore, AppInstallStep, BackupStep, DeviceInfo, DeviceModel, Error,
-    FirmwareUpdateInfo, FirmwareUpdateStep, LanguageInstallStep, LoadImageStep, RestoreStep,
-    SocketEvent, UpdateAndRestoreOptions, UpdateAndRestoreResult, UpdateAndRestoreStep,
-    BITCOIN_APP_NAME, BITCOIN_TEST_APP_NAME,
+    list_installed_apps_raw, open_device, update_bitcoin_app, update_firmware_and_restore,
+    AppInstallStep, BackupStep, DeviceInfo, DeviceModel, Error, FirmwareUpdateInfo,
+    FirmwareUpdateStep, LanguageInstallStep, LoadImageStep, RestoreStep, SocketEvent,
+    UpdateAndRestoreResult, UpdateAndRestoreStep, BITCOIN_APP_NAME, BITCOIN_TEST_APP_NAME,
 };
 
 use std::path::PathBuf;
@@ -50,7 +48,7 @@ fn installed_bitcoin_apps(transport: &TransportNativeHID) -> Result<(Version, Ve
     let infos = if hashes.is_empty() {
         Vec::new()
     } else {
-        bitcoin_apps_by_hashes(hashes).unwrap_or_else(|e| {
+        apps_by_hashes(hashes).unwrap_or_else(|e| {
             log::error!("Error querying the installed apps versions: {}", e);
             Vec::new()
         })
@@ -270,9 +268,9 @@ pub fn install_app(reporter: &Reporter, testnet: bool, update: bool) -> TaskResu
     };
     let progress = |step| report_app_step(reporter, step);
     let res = if update {
-        update_bitcoin_app_with_progress(&transport, testnet, progress).map_err(|e| e.to_string())
+        update_bitcoin_app(&transport, testnet, progress).map_err(|e| e.to_string())
     } else {
-        install_bitcoin_app_with_progress(&transport, testnet, progress).map_err(|e| e.to_string())
+        install_bitcoin_app(&transport, testnet, progress).map_err(|e| e.to_string())
     };
     // Release the device before reloading its information.
     drop(transport);
@@ -306,7 +304,7 @@ pub fn genuine_check(reporter: &Reporter) -> Option<bool> {
     log::info!("ledger::genuine_check()");
     let (transport, _) = connect(reporter)?;
     reporter.status("Checking if the device is genuine...");
-    let res = genuine_check_with_events(&transport, |e| match e {
+    let res = ledger_manager::genuine_check(&transport, |e| match e {
         SocketEvent::DevicePermissionRequested => {
             reporter.status("Please allow the Ledger manager on your device.")
         }
@@ -400,7 +398,6 @@ fn report_backup_step(reporter: &Reporter, step: BackupStep) {
         BackupStep::ListingApps => reporter.status(
             "Backing up the list of installed apps. Please allow the Ledger manager on your device if it asks for it.",
         ),
-        BackupStep::QueryingApi => reporter.status("Backing up the list of installed apps..."),
         BackupStep::FetchingLockScreen => {
             reporter.progress(None);
             reporter.status(
@@ -468,7 +465,7 @@ fn report_restore_step(reporter: &Reporter, step: RestoreStep) {
             reporter.progress(Some(progress));
         }
         RestoreStep::App(step) => report_app_step(reporter, step),
-        RestoreStep::Done { .. } => reporter.progress(None),
+        RestoreStep::Done => reporter.progress(None),
     }
 }
 
@@ -552,9 +549,9 @@ pub fn update_firmware(
         update.version(),
         save_backup
     );
-    let options = if save_backup {
+    let backup_dir = if save_backup {
         match default_backup_dir() {
-            Some(dir) => UpdateAndRestoreOptions::new(dir),
+            Some(dir) => Some(dir),
             None => {
                 return TaskResult::BackupNotSaved(
                     "Could not determine the configuration directory to save the backup of the device settings.".to_string(),
@@ -562,7 +559,7 @@ pub fn update_firmware(
             }
         }
     } else {
-        UpdateAndRestoreOptions::memory_only()
+        None
     };
     let mut api = match HidApi::new() {
         Ok(api) => api,
@@ -574,7 +571,7 @@ pub fn update_firmware(
         }
     };
     let mut backup_path = None;
-    let res = update_firmware_and_restore(&mut api, &update, &options, |step| {
+    let res = update_firmware_and_restore(&mut api, &update, backup_dir.as_deref(), |step| {
         if let UpdateAndRestoreStep::BackupSaved { path }
         | UpdateAndRestoreStep::BackupLoaded { path } = &step
         {

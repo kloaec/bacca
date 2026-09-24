@@ -1,81 +1,52 @@
-//! Ledger Manager.
+//! Ledger Manager: install and update the Bitcoin apps and the firmware of a Ledger device.
 //!
-//! This implements utility functions to manage the applications installed on your Ledger device
-//! and to update its firmware. This is performed by both talking to the Ledger device connected by
-//! USB but also by making HTTP request to the Ledger API used by Ledger Live, and by relaying
-//! commands from Ledger's HSM to the device through a websocket.
+//! This talks to the device connected by USB, makes HTTP requests to the Ledger API used by
+//! Ledger Live, and relays commands from Ledger's HSM to the device through a websocket.
 //!
 //! Supported devices: Ledger Nano S, Nano S Plus, Nano X, Stax, Flex and Nano Gen5.
+//!
+//! The modules, from the lowest level:
+//! - `device`: finding the device, its model and information (GetVersion);
+//! - `hid`: a HID transport with a timeout, for the firmware updates;
+//! - `api`: the Ledger Manager API;
+//! - `socket`: the websocket sessions with Ledger's HSM;
+//! - `apps`: the Bitcoin apps and the genuine check;
+//! - `firmware`: the firmware update and repair;
+//! - `language`, `lock_screen` and `restore`: backing up the settings of the device before a
+//!   firmware update and restoring them after.
 
-pub use ledger_apdu;
 pub use ledger_transport_hidapi;
 
-pub mod api;
-pub mod apps;
-pub mod device;
-pub mod error;
-pub mod firmware;
+mod api;
+mod apps;
+mod device;
+mod error;
+mod firmware;
 mod hid;
-pub mod language;
-pub mod lock_screen;
-pub mod model;
-pub mod restore;
-pub mod socket;
-pub mod version;
+mod language;
+mod lock_screen;
+mod restore;
+mod socket;
 
 pub use api::{
-    apps_catalog, bitcoin_apps_by_hashes, current_firmware, fetch_mcus, get_current_firmware,
-    get_current_osu, get_device_version, get_final_firmware_by_id, get_latest_firmware,
-    latest_firmware, AppInfo, BitcoinAppInfo, DeviceVersion, FinalFirmware, FirmwareInfo,
-    FirmwareUpdateInfo, McuVersion, OsuFirmware,
+    apps_by_hashes, current_firmware, fetch_mcus, latest_firmware, AppInfo, FirmwareUpdateInfo,
 };
 pub use apps::{
-    bitcoin_app_installed, bitcoin_app_name, bitcoin_latest_app, genuine_check,
-    genuine_check_with_events, get_latest_apps, install_app, install_bitcoin_app,
-    install_bitcoin_app_with_progress, is_app_update_available, is_bitcoin_app_installed,
-    list_installed_apps, list_installed_apps_raw, open_bitcoin_app, uninstall_app,
-    update_bitcoin_app, update_bitcoin_app_with_progress, AppInstallStep, InstallErr, InstalledApp,
-    UpdateErr, BITCOIN_APP_NAME, BITCOIN_TEST_APP_NAME,
+    genuine_check, get_latest_apps, install_bitcoin_app, list_installed_apps,
+    list_installed_apps_raw, open_bitcoin_app, update_bitcoin_app, AppInstallStep, InstalledApp,
+    BITCOIN_APP_NAME, BITCOIN_TEST_APP_NAME,
 };
-pub use device::{
-    connect, get_app_and_version, list_ledger_devices, open_device, quit_app, wait_for_device,
-    AppAndVersion, DeviceInfo, LedgerHidDevice,
-};
-pub use error::{Error, SocketContext, StatusCode};
+pub use device::{list_ledger_devices, open_device, DeviceInfo, DeviceModel};
+pub use error::Error;
 pub use firmware::{
-    check_firmware_update_supported, firmware_update_resets_customization,
-    firmware_update_will_uninstall_apps, format_hash_name, repair_firmware,
-    repair_firmware_with_options, update_firmware, update_firmware_with_options,
-    FirmwareUpdateOptions, FirmwareUpdateStep,
+    check_firmware_update_supported, firmware_update_resets_customization, repair_firmware,
+    update_firmware, FirmwareUpdateStep,
 };
-pub use language::{
-    install_language, language_display_name, language_id, language_name,
-    language_packages_for_device, LanguageInstallStep, LanguagePackage, ENGLISH_LANGUAGE_ID,
-    LANGUAGES,
-};
-pub use lock_screen::{fetch_image, load_image, FetchedImage, LoadImageStep};
-pub use model::{DeviceModel, ScreenSpecs, LEDGER_USB_VENDOR_ID};
+pub use language::{language_packages_for_device, LanguageInstallStep, LanguagePackage};
+pub use lock_screen::LoadImageStep;
 pub use restore::{
-    backup_device_settings, backup_file_name, default_backup_dir, find_latest_backup, load_backup,
-    restore_device_settings, save_backup, update_firmware_and_restore, AppRestoreOutcome,
-    BackedUpApp, BackupLocation, BackupStep, DeviceBackup, LockScreenBackup, RestoreOutcome,
-    RestoreReport, RestoreStep, UpdateAndRestoreOptions, UpdateAndRestoreResult,
-    UpdateAndRestoreStep,
+    default_backup_dir, find_latest_backup, load_backup, restore_device_settings,
+    update_firmware_and_restore, BackupStep, DeviceBackup, RestoreOutcome, RestoreReport,
+    RestoreStep, UpdateAndRestoreResult, UpdateAndRestoreStep,
 };
-pub use socket::{query_via_websocket, run_device_socket, SocketEvent};
-
-/// The Ledger Live API requires request to set their claimed version of Ledger Live. This is the
-/// version of ledger-live-common at the time of writing
-/// (https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/package.json).
-pub const LIVE_COMMON_VERSION: &str = "38.0.0";
-
-/// The Ledger Live API has multiple channels to download binaries. This sets which one to use. 1
-/// is default. 4 is "shitcoins". The rest is unclear. Defined here:
-/// https://github.com/LedgerHQ/ledger-live/blob/4d1d7bb3462fd0c986ed587f0cf426afc96850c8/libs/device-core/src/managerApi/use-cases/getProviderIdUseCase.ts#L3-L9
-/// This is the default provider, a device with a firmware version suffixed with the name of
-/// another provider will use that one instead (see `DeviceInfo::provider_id`).
-pub const PROVIDER: u32 = 1;
-
-pub const BASE_API_V1_URL: &str = "https://manager.api.live.ledger.com/api";
-pub const BASE_API_V2_URL: &str = "https://manager.api.live.ledger.com/api/v2";
-pub const BASE_SOCKET_URL: &str = "wss://scriptrunner.api.live.ledger.com/update";
+pub use socket::SocketEvent;
