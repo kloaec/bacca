@@ -4,7 +4,10 @@
 //! The devices are simulated: we build the GetVersion response a device running an old firmware
 //! would send, and check the API gives us sensible update and app information for it.
 
-use ledger_manager::{current_firmware, get_latest_apps, latest_firmware, DeviceInfo, DeviceModel};
+use ledger_manager::{
+    apps_by_hashes, current_firmware, fetch_mcus, get_latest_apps, language_packages_for_device,
+    latest_firmware, DeviceInfo, DeviceModel,
+};
 
 /// Encode a GetVersion response (without the status word) for a device in normal mode.
 fn get_version_response(target_id: u32, se: &str, mcu: &str, bootloader: &str) -> Vec<u8> {
@@ -57,7 +60,7 @@ fn devices() -> impl Iterator<Item = (DeviceModel, DeviceInfo)> {
 #[ignore]
 fn live_firmware_updates() {
     for (model, info) in devices() {
-        assert_eq!(info.model(), Some(model));
+        assert_eq!(info.model, Some(model));
         let current = current_firmware(&info).unwrap();
         assert_eq!(current.name, info.version);
         let update = latest_firmware(&info)
@@ -81,9 +84,7 @@ fn live_bitcoin_apps() {
         let (bitcoin, test) = get_latest_apps(&info).unwrap();
         let bitcoin = bitcoin.unwrap_or_else(|| panic!("{model}: Bitcoin app in catalog"));
         assert!(test.is_some(), "{model}: Bitcoin Test app in catalog");
-        let by_hash =
-            ledger_manager::bitcoin_apps_by_hashes(vec![hex::decode(&bitcoin.hash).unwrap()])
-                .unwrap();
+        let by_hash = apps_by_hashes(vec![hex::decode(&bitcoin.hash).unwrap()]).unwrap();
         assert_eq!(
             by_hash[0].as_ref().map(|a| &a.version),
             Some(&bitcoin.version)
@@ -96,7 +97,7 @@ fn live_bitcoin_apps() {
 #[ignore]
 fn live_mcus() {
     // At the time of writing the API lists 169 MCU versions, which all parse.
-    let mcus = ledger_manager::fetch_mcus().unwrap();
+    let mcus = fetch_mcus().unwrap();
     assert!(mcus.len() > 100, "{} MCU versions", mcus.len());
 }
 
@@ -104,9 +105,9 @@ fn live_mcus() {
 #[ignore]
 fn live_language_packs() {
     for (model, info) in devices() {
-        let packs = ledger_manager::language_packages_for_device(&info).unwrap();
-        let supported =
-            ledger_manager::device::is_device_localization_supported(&info.version, Some(model));
+        let packs = language_packages_for_device(&info).unwrap();
+        // The language id is only returned by the firmwares supporting changing the language.
+        let supported = info.language_id.is_some();
         let languages: Vec<&str> = packs.iter().map(|p| p.language.as_str()).collect();
         println!("{model} {}: {:?}", info.version, languages);
         if supported {
@@ -124,21 +125,23 @@ fn live_language_packs() {
 
 #[test]
 #[ignore]
-fn live_apps_catalog() {
+fn live_bitcoin_apps_have_no_dependency() {
+    // After a firmware update only the Bitcoin apps are reinstalled, without resolving the
+    // dependencies of the apps (`parentName`): check they have none.
     for (model, info) in devices() {
-        let catalog = ledger_manager::apps_catalog(&info).unwrap();
+        let url = format!(
+            "https://manager.api.live.ledger.com/api/v2/apps/by-target?livecommonversion=38.0.0&provider=1&target_id={}&firmware_version_name={}",
+            info.target_id, info.version
+        );
+        let catalog: Vec<serde_json::Value> = minreq::get(url).send().unwrap().json().unwrap();
         assert!(catalog.len() > 20, "{model}: {} apps", catalog.len());
-        assert!(catalog.iter().any(|a| a.version_name == "Bitcoin"));
-        // The dependencies are in the catalog.
-        for app in &catalog {
-            if let Some(parent) = app.parent_name.as_deref().filter(|p| !p.is_empty()) {
-                assert!(
-                    catalog.iter().any(|a| a.version_name == parent),
-                    "{model}: {} depends on {parent}",
-                    app.version_name
-                );
-            }
+        for name in ["Bitcoin", "Bitcoin Test"] {
+            let app = catalog
+                .iter()
+                .find(|a| a["versionName"] == name)
+                .unwrap_or_else(|| panic!("{model}: {name} in the catalog"));
+            let parent = app["parentName"].as_str().unwrap_or_default();
+            assert!(parent.is_empty(), "{model}: {name} depends on {parent}");
         }
-        println!("{model}: {} apps in the catalog", catalog.len());
     }
 }

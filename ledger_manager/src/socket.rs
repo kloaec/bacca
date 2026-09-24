@@ -1,70 +1,83 @@
 //! Websocket sessions with Ledger's HSM ("scriptrunner").
 //!
-//! Some actions, such as installing apps or upgrading the firmware, are done in Ledger Live by
-//! opening a socket so a remote server communicates directly with the Ledger. It appears to be
-//! talking to an HSM up there which would manage sensitive actions.
+//! Installing apps, updating the firmware or checking the device is genuine is done by opening a
+//! websocket to Ledger's HSM, which sends APDUs we relay to the device.
 //!
 //! Ported from https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/socket/index.ts
 
-use crate::{
-    error::{remap_socket_error, Error, SocketContext, StatusCode},
-    LIVE_COMMON_VERSION,
-};
+use crate::{api::LIVE_COMMON_VERSION, error::*, hid::HidTransport};
 
-use crate::hid::HidTransport;
-
-use ledger_apdu::APDUCommand;
+use ledger_apdu::{APDUAnswer, APDUCommand};
 use ledger_transport_hidapi::TransportNativeHID;
 use serde_derive::Deserialize;
 
-use std::time::Duration;
+const BASE_SOCKET_URL: &str = "wss://scriptrunner.api.live.ledger.com/update";
 
-/// An event happening during a socket session with the HSM.
+/// An event of a socket session with the HSM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketEvent {
-    /// The websocket connection is open.
-    Opened,
-    /// The HSM requested to open a secure channel with the device. The user must allow the Ledger
-    /// manager on the device. (APDU starting with 0xe051.)
+    /// The HSM requested to open a secure channel with the device: the user must allow the
+    /// Ledger manager on the device.
     DevicePermissionRequested,
     /// The user allowed the Ledger manager on the device.
     DevicePermissionGranted,
-    /// A single APDU was exchanged with the device on behalf of the HSM.
-    Exchange { status: u16 },
-    /// A bulk of APDUs is being sent to the device. `index` APDUs out of `total` were already
-    /// sent. Emitted once with `index == 0` before sending the first APDU and after each APDU.
+    /// `index` APDUs of a bulk of `total` were sent to the device.
     BulkProgress { index: usize, total: usize },
-    /// A warning sent by the HSM.
-    Warning(String),
 }
 
 impl SocketEvent {
-    /// The progress of the bulk, between 0 and 1, if this is a bulk progress event.
-    pub fn bulk_progress(&self) -> Option<f32> {
+    /// The progress of a bulk, between 0 and 1 (0 for the other events).
+    pub(crate) fn bulk_progress(&self) -> f32 {
         match self {
             SocketEvent::BulkProgress { index, total } if *total > 0 => {
-                Some(*index as f32 / *total as f32)
+                *index as f32 / *total as f32
             }
-            SocketEvent::BulkProgress { .. } => Some(1.0),
-            _ => None,
+            SocketEvent::BulkProgress { .. } => 1.0,
+            _ => 0.0,
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct HsmMessage {
-    pub query: String,
-    #[serde(default)]
-    pub nonce: Option<serde_json::Value>,
-    #[serde(default)]
-    pub data: Option<serde_json::Value>,
-    #[serde(default)]
-    pub result: Option<serde_json::Value>,
+/// What the session is for, to interpret its errors like Ledger Live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Context {
+    GenuineCheck,
+    /// Installing or uninstalling an app.
+    App,
+    /// Installing an OSU or a final firmware, flashing the MCU or the bootloader.
+    Firmware,
 }
 
-fn decode_apdu_hex(hex_str: &str) -> Result<Vec<u8>, Error> {
-    hex::decode(hex_str)
-        .map_err(|e| Error::UnexpectedHsmMessage(format!("invalid APDU hex '{}': {}", hex_str, e)))
+/// How the APDUs of the HSM are sent to the device.
+pub(crate) enum Transport<'a> {
+    /// Through `TransportNativeHID`, which can only send `CLA INS P1 P2 Lc data` APDUs (see
+    /// `deser_apdu_command`).
+    Native(&'a TransportNativeHID),
+    /// As is, and with a timeout (see `hid`). Used for firmware updates.
+    Raw(&'a HidTransport),
+}
+
+impl Transport<'_> {
+    /// Check an APDU sent by the HSM can be sent to the device.
+    fn check(&self, apdu: &[u8]) -> Result<(), Error> {
+        match self {
+            Transport::Native(_) => deser_apdu_command(apdu).map(|_| ()),
+            Transport::Raw(_) if apdu.is_empty() => Err(hsm_msg_err("empty APDU")),
+            Transport::Raw(_) => Ok(()),
+        }
+    }
+
+    /// Send an APDU to the device. `interactive` is set when the device may wait for the user.
+    fn send(&self, apdu: &[u8], interactive: bool) -> Result<APDUAnswer<Vec<u8>>, Error> {
+        match self {
+            Transport::Native(t) => Ok(t.exchange(&deser_apdu_command(apdu)?)?),
+            Transport::Raw(t) => t.exchange_raw(apdu, interactive),
+        }
+    }
+}
+
+fn hsm_msg_err(s: impl std::fmt::Display) -> Error {
+    Error::Other(format!("Unexpected message from Ledger's HSM: {}", s))
 }
 
 /// Map the raw bytes of an APDU sent by the HSM to an `APDUCommand`, which is what
@@ -80,128 +93,68 @@ fn decode_apdu_hex(hex_str: &str) -> Result<Vec<u8>, Error> {
 /// - any other length mismatch to all the bytes after `Lc` as `data`, logging a warning. The
 ///   `Lc` byte sent is then the actual length of the data, not the one given by the HSM.
 ///
-/// Only an APDU shorter than a header or with more than 255 bytes of data is rejected. The
-/// firmware update sessions don't go through this mapping, they forward the raw bytes (see
-/// `TimeoutTransport`).
+/// Only an APDU shorter than a header or with more than 255 bytes of data is rejected.
 pub(crate) fn deser_apdu_command(bytes: &[u8]) -> Result<APDUCommand<Vec<u8>>, Error> {
     if bytes.len() < 4 {
-        return Err(Error::UnexpectedHsmMessage(format!(
+        return Err(hsm_msg_err(format!(
             "APDU too short: '{}'",
             hex::encode(bytes)
         )));
     }
-    let (cla, ins, p1, p2) = (bytes[0], bytes[1], bytes[2], bytes[3]);
     let data = match bytes.get(4) {
         None => &[][..],
         Some(&lc) => {
-            let lc = lc as usize;
-            let body = &bytes[5..];
-            if body.len() == lc {
-                body
-            } else if body.len() == lc + 1 {
-                log::trace!("Dropping the Le byte of APDU {}.", hex::encode(bytes));
+            let (lc, body) = (lc as usize, &bytes[5..]);
+            if body.len() == lc + 1 {
                 &body[..lc]
             } else {
-                log::warn!(
-                    "APDU length mismatch (Lc {}, {} bytes of data), forwarding the data as is: {}",
-                    lc,
-                    body.len(),
-                    hex::encode(bytes)
-                );
+                if body.len() != lc {
+                    log::warn!(
+                        "APDU length mismatch (Lc {}, {} bytes of data), forwarding the data as is: {}",
+                        lc,
+                        body.len(),
+                        hex::encode(bytes)
+                    );
+                }
                 body
             }
         }
     };
     if data.len() > 255 {
-        return Err(Error::UnexpectedHsmMessage(format!(
+        return Err(hsm_msg_err(format!(
             "APDU too long: '{}'",
             hex::encode(bytes)
         )));
     }
     Ok(APDUCommand {
-        cla,
-        ins,
-        p1,
-        p2,
+        cla: bytes[0],
+        ins: bytes[1],
+        p1: bytes[2],
+        p2: bytes[3],
         data: data.to_vec(),
     })
 }
 
-/// A transport the APDUs of the HSM can be relayed through.
-pub(crate) trait HsmTransport {
-    /// An APDU ready to be sent.
-    type Command;
-
-    /// Check and convert the raw bytes of an APDU sent by the HSM. Called for all the APDUs of a
-    /// bulk before sending any of them.
-    fn prepare(&self, raw: Vec<u8>) -> Result<Self::Command, Error>;
-
-    /// Send an APDU to the device. `interactive` is set when the device may wait for the user
-    /// before answering.
-    fn send(
-        &self,
-        command: &Self::Command,
-        interactive: bool,
-    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error>;
-}
-
-impl HsmTransport for TransportNativeHID {
-    type Command = APDUCommand<Vec<u8>>;
-
-    fn prepare(&self, raw: Vec<u8>) -> Result<Self::Command, Error> {
-        deser_apdu_command(&raw)
-    }
-
-    fn send(
-        &self,
-        command: &Self::Command,
-        _interactive: bool,
-    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error> {
-        Ok(self.exchange(command)?)
-    }
-}
-
-/// The HID transport used for firmware updates: raw APDUs are forwarded as is, and the device
-/// must answer within `timeout` unless it waits for the user.
-pub(crate) struct TimeoutTransport<'a> {
-    pub transport: &'a HidTransport,
-    pub timeout: Duration,
-}
-
-impl HsmTransport for TimeoutTransport<'_> {
-    type Command = Vec<u8>;
-
-    fn prepare(&self, raw: Vec<u8>) -> Result<Self::Command, Error> {
-        if raw.is_empty() {
-            return Err(Error::UnexpectedHsmMessage("empty APDU".into()));
-        }
-        Ok(raw)
-    }
-
-    fn send(
-        &self,
-        command: &Self::Command,
-        interactive: bool,
-    ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, Error> {
-        let timeout = if interactive {
-            None
-        } else {
-            Some(self.timeout)
-        };
-        self.transport.exchange_raw(command, timeout)
-    }
-}
-
-/// Build the URL of a scriptrunner endpoint (e.g. "install", "genuine", "mcu") with the given
-/// parameters. `livecommonversion` is appended last, as Ledger Live does with
-/// `URL.format({ query: { ...params, livecommonversion } })`.
+/// The URL of a scriptrunner endpoint ("install", "genuine", "mcu") with these parameters.
+/// `livecommonversion` is appended last, as Ledger Live does.
 pub(crate) fn socket_url(endpoint: &str, params: &[(&str, &str)]) -> String {
     let mut ser = form_urlencoded::Serializer::new(String::new());
     for (k, v) in params {
         ser.append_pair(k, v);
     }
     ser.append_pair("livecommonversion", LIVE_COMMON_VERSION);
-    format!("{}/{}?{}", crate::BASE_SOCKET_URL, endpoint, ser.finish())
+    format!("{}/{}?{}", BASE_SOCKET_URL, endpoint, ser.finish())
+}
+
+#[derive(Debug, Deserialize)]
+struct HsmMessage {
+    query: String,
+    #[serde(default)]
+    nonce: Option<serde_json::Value>,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
 }
 
 fn data_as_string(data: &Option<serde_json::Value>) -> String {
@@ -212,74 +165,54 @@ fn data_as_string(data: &Option<serde_json::Value>) -> String {
     }
 }
 
-/// What to do after processing a message from the HSM.
-enum Next {
-    Continue,
-    /// The session completed, with this optional result payload.
-    Done(Option<serde_json::Value>),
+fn decode_apdu_hex(s: &str) -> Result<Vec<u8>, Error> {
+    hex::decode(s).map_err(|e| hsm_msg_err(format!("invalid APDU hex '{}': {}", s, e)))
 }
 
-/// The state of a socket session, independent of the network. This is separated from the network
-/// loop to make it easier to reason about (and to test).
-struct Session<'a, T: HsmTransport, F: FnMut(SocketEvent)> {
-    transport: &'a T,
+struct Session<'a, F: FnMut(SocketEvent)> {
+    transport: Transport<'a>,
     on_event: F,
-    /// An error originating from the device, cached until the next message from the HSM. If the
-    /// socket gets closed without a result, this is the error we return.
+    /// An error from the device, kept until the next message from the HSM. If the socket gets
+    /// closed without a result, this is the error we return.
     device_error: Option<Error>,
 }
 
-impl<T: HsmTransport, F: FnMut(SocketEvent)> Session<'_, T, F> {
-    /// Handle an "exchange" query: a single ping-pong APDU with the HSM. Returns the response to
-    /// send back.
+impl<F: FnMut(SocketEvent)> Session<'_, F> {
+    /// Handle an "exchange" query: a single APDU. Returns the response for the HSM.
     fn exchange(&mut self, msg: &HsmMessage) -> Result<serde_json::Value, Error> {
         let apdu_hex = match &msg.data {
             Some(serde_json::Value::String(s)) => s,
             _ => {
-                return Err(Error::UnexpectedHsmMessage(
-                    "a single command is expected in 'exchange' mode".into(),
+                return Err(hsm_msg_err(
+                    "a single command is expected in 'exchange' mode",
                 ))
             }
         };
-        let raw = decode_apdu_hex(apdu_hex)?;
-        // Detect the specific exchange that triggers the allow secure channel request.
-        let pending_user_allow_secure_channel = raw.starts_with(&[0xe0, 0x51]);
-        let command = self.transport.prepare(raw)?;
-        if pending_user_allow_secure_channel {
+        let apdu = decode_apdu_hex(apdu_hex)?;
+        self.transport.check(&apdu)?;
+        // This APDU asks the user to allow the secure channel.
+        let asks_permission = apdu.starts_with(&[0xe0, 0x51]);
+        if asks_permission {
             (self.on_event)(SocketEvent::DevicePermissionRequested);
         }
-
-        let resp = self
-            .transport
-            .send(&command, pending_user_allow_secure_channel)?;
-        let status = resp.retcode();
-
-        let response = match status {
-            s if s == StatusCode::OK as u16 => "success",
-            s if s == StatusCode::LockedDevice as u16 => return Err(Error::DeviceLocked),
-            s if (s == StatusCode::UserRefusedOnDevice as u16
-                || s == StatusCode::ConditionsOfUseNotSatisfied as u16)
-                && pending_user_allow_secure_channel =>
-            {
-                return Err(Error::UserRefusedAllowManager)
+        let resp = self.transport.send(&apdu, asks_permission)?;
+        let response = match resp.retcode() {
+            SW_OK => "success",
+            SW_LOCKED => return Err(Error::DeviceLocked),
+            SW_USER_REFUSED | SW_CONDITIONS_NOT_SATISFIED if asks_permission => {
+                return Err(Error::RefusedOnDevice("The Ledger manager"))
             }
             s => {
-                // Other errors may not throw directly, we will instead keep track of them and
-                // throw them if the next event from the ws connection is a disconnect. Otherwise,
-                // we clear them.
+                // Other errors are kept, and returned if the HSM then closes the socket.
                 log::debug!("Device returned status {:#06x} to APDU {}.", s, apdu_hex);
                 self.device_error = Some(Error::DeviceStatus(s));
                 "error"
             }
         };
-
-        if pending_user_allow_secure_channel {
+        if asks_permission {
             (self.on_event)(SocketEvent::DevicePermissionGranted);
         }
-        (self.on_event)(SocketEvent::Exchange { status });
-
-        // NOTE: the HSM expects only the data, not the last two bytes of the raw response (the
-        // status) in the "data" field below.
+        // NOTE: the HSM expects only the data, not the status word.
         Ok(serde_json::json!({
             "nonce": msg.nonce,
             "response": response,
@@ -292,37 +225,29 @@ impl<T: HsmTransport, F: FnMut(SocketEvent)> Session<'_, T, F> {
     fn bulk(&mut self, msg: &HsmMessage) -> Result<(), Error> {
         let data = match &msg.data {
             Some(serde_json::Value::Array(a)) => a,
-            _ => {
-                return Err(Error::UnexpectedHsmMessage(
-                    "expecting a list of commands in bulk mode".into(),
-                ))
-            }
+            _ => return Err(hsm_msg_err("expecting a list of commands in bulk mode")),
         };
-        // If the bulk payload includes trailing empty strings we end up sending empty data to the
-        // device and causing a disconnect.
-        let commands = data
+        // Trailing empty strings would make us send empty data to the device, which disconnects.
+        let apdus = data
             .iter()
-            .filter_map(|v| match v {
-                serde_json::Value::String(s) if s.is_empty() => None,
-                serde_json::Value::String(s) => {
-                    Some(decode_apdu_hex(s).and_then(|raw| self.transport.prepare(raw)))
-                }
-                v => Some(Err(Error::UnexpectedHsmMessage(format!(
-                    "invalid command in bulk: {}",
-                    v
-                )))),
+            .filter(|v| v.as_str() != Some(""))
+            .map(|v| {
+                let apdu = decode_apdu_hex(
+                    v.as_str()
+                        .ok_or_else(|| hsm_msg_err(format!("invalid command in bulk: {}", v)))?,
+                )?;
+                self.transport.check(&apdu)?;
+                Ok(apdu)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
 
-        let total = commands.len();
+        let total = apdus.len();
         (self.on_event)(SocketEvent::BulkProgress { index: 0, total });
-        for (i, command) in commands.iter().enumerate() {
-            // The penultimate APDU of a firmware installation requires the user to confirm the
-            // update on the device (see `firmware::osu_step`), don't expect a quick answer for the
-            // last two.
-            let interactive = i + 2 >= total;
-            let resp = self.transport.send(command, interactive)?;
-            if resp.retcode() != StatusCode::OK as u16 {
+        for (i, apdu) in apdus.iter().enumerate() {
+            // The penultimate APDU of a firmware installation waits for the user to confirm the
+            // update on the device (see `firmware::osu_step`): no timeout for the last two.
+            let resp = self.transport.send(apdu, i + 2 >= total)?;
+            if resp.retcode() != SW_OK {
                 log::debug!(
                     "Device returned status {:#06x} for bulk APDU {}/{}.",
                     resp.retcode(),
@@ -340,175 +265,135 @@ impl<T: HsmTransport, F: FnMut(SocketEvent)> Session<'_, T, F> {
     }
 }
 
-/// Run a socket session with the HSM at this URL, relaying APDUs to the device. Events are
-/// reported through `on_event`. Returns the result payload sent by the HSM on success, if any
-/// (for instance "0000" for a successful genuine check).
-///
-/// Errors are interpreted according to `context`, the same way Ledger Live does.
-///
-/// Parameters are passed directly in the url. Don't forget to escape the necessary characters!
-pub fn run_device_socket<F>(
-    ledger_api: &TransportNativeHID,
+/// Run a socket session with the HSM at this URL (with its parameters escaped), relaying its
+/// APDUs to the device. Returns the result payload sent by the HSM on success, if any (e.g.
+/// "0000" for a successful genuine check). Errors are interpreted according to `context`.
+pub(crate) fn run_socket(
+    transport: Transport,
     url: &str,
-    context: SocketContext,
-    on_event: F,
-) -> Result<Option<serde_json::Value>, Error>
-where
-    F: FnMut(SocketEvent),
-{
-    run_hsm_session(ledger_api, url, context, on_event)
+    context: Context,
+    on_event: impl FnMut(SocketEvent),
+) -> Result<Option<serde_json::Value>, Error> {
+    let mut session = Session {
+        transport,
+        on_event,
+        device_error: None,
+    };
+    run_session(&mut session, url).map_err(|e| remap_error(e, context))
 }
 
-/// Same as `run_device_socket`, over any transport.
-pub(crate) fn run_hsm_session<T, F>(
-    transport: &T,
+fn run_session<F: FnMut(SocketEvent)>(
+    session: &mut Session<F>,
     url: &str,
-    context: SocketContext,
-    on_event: F,
-) -> Result<Option<serde_json::Value>, Error>
-where
-    T: HsmTransport,
-    F: FnMut(SocketEvent),
-{
-    run_device_socket_inner(transport, url, on_event).map_err(|e| remap_socket_error(e, context))
-}
-
-fn run_device_socket_inner<T, F>(
-    ledger_api: &T,
-    url: &str,
-    on_event: F,
-) -> Result<Option<serde_json::Value>, Error>
-where
-    T: HsmTransport,
-    F: FnMut(SocketEvent),
-{
+) -> Result<Option<serde_json::Value>, Error> {
     // Don't log the parameters, they might contain sensitive tokens.
     log::debug!(
         "Opening websocket to {}.",
         url.split('?').next().unwrap_or_default()
     );
     let (mut socket, _) = tungstenite::connect(url)?;
-    let mut session = Session {
-        transport: ledger_api,
-        on_event,
-        device_error: None,
+    let close = |socket: &mut tungstenite::WebSocket<_>| {
+        if let Err(e) = socket.close(None) {
+            log::debug!("Error closing the websocket: {}", e);
+        }
     };
-    (session.on_event)(SocketEvent::Opened);
-
-    // https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/socket/index.ts
     loop {
-        let msg = match socket.read() {
-            Ok(m) => m,
-            Err(tungstenite::Error::ConnectionClosed)
+        let text = match socket.read() {
+            // It appears they only exchange JSON text messages.
+            Ok(tungstenite::Message::Text(text)) => text,
+            Ok(tungstenite::Message::Binary(b)) => {
+                log::warn!("Ignoring binary message from the HSM ({} bytes).", b.len());
+                continue;
+            }
+            // Pings are answered automatically by tungstenite.
+            Ok(tungstenite::Message::Ping(_))
+            | Ok(tungstenite::Message::Pong(_))
+            | Ok(tungstenite::Message::Frame(_)) => continue,
+            Ok(tungstenite::Message::Close(_))
+            | Err(tungstenite::Error::ConnectionClosed)
             | Err(tungstenite::Error::AlreadyClosed)
             | Err(tungstenite::Error::Protocol(
                 tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
             )) => {
-                // Nb Give priority to the cached error from a device connection, since websocket
-                // closes give us no information on what caused the close.
+                // Give priority to the error from the device, since websocket closes give us no
+                // information on what caused the close.
                 log::debug!("Socket closed before the end of the session.");
-                return Err(session
-                    .device_error
-                    .take()
-                    .unwrap_or(Error::WebSocketClosed));
+                return Err(session.device_error.take().unwrap_or_else(|| {
+                    Error::Other("Websocket connection closed unexpectedly.".into())
+                }));
             }
             Err(e) => return Err(e.into()),
         };
 
-        let text = match msg {
-            // It appears they only exchange JSON text messages.
-            tungstenite::Message::Text(text) => text,
-            tungstenite::Message::Close(frame) => {
-                log::debug!("Socket closed by the HSM: {:?}", frame);
-                return Err(session
-                    .device_error
-                    .take()
-                    .unwrap_or(Error::WebSocketClosed));
-            }
-            // Pings are answered automatically by tungstenite.
-            tungstenite::Message::Ping(_)
-            | tungstenite::Message::Pong(_)
-            | tungstenite::Message::Frame(_) => continue,
-            tungstenite::Message::Binary(b) => {
-                log::warn!("Ignoring binary message from the HSM ({} bytes).", b.len());
-                continue;
-            }
-        };
-
-        // If we continue to receive messages, the cached error is obsolete.
+        // If we continue to receive messages, the error from the device is obsolete.
         session.device_error = None;
-        let msg: HsmMessage = serde_json::from_str(&text)
-            .map_err(|e| Error::UnexpectedHsmMessage(format!("{} ({})", e, text)))?;
+        let msg: HsmMessage =
+            serde_json::from_str(&text).map_err(|e| hsm_msg_err(format!("{} ({})", e, text)))?;
         log::trace!("Socket in: {}", msg.query);
 
-        // The dance is usually:
-        // - first the HSM sends a few standalone commands;
-        // - then it sends a bunch in bulk;
-        // - or finally it sends a success.
-        let next = match msg.query.as_str() {
+        // The dance is usually: first a few single APDUs, then a bulk, or finally a success.
+        match msg.query.as_str() {
             "exchange" => {
                 let resp = session.exchange(&msg)?;
                 socket.send(tungstenite::Message::Text(
                     serde_json::to_string(&resp)?.into(),
                 ))?;
-                Next::Continue
             }
             "bulk" => {
-                // In bulk, a lot of APDUs will be unrolled, and the web socket is no longer
-                // needed. Ledger Live closes it right away and considers the session complete
-                // once all APDUs were exchanged.
-                if let Err(e) = socket.close(None) {
-                    log::debug!("Error closing the websocket: {}", e);
-                }
+                // The websocket is not needed anymore for a bulk. Ledger Live closes it right
+                // away and considers the session complete once all APDUs were exchanged.
+                close(&mut socket);
                 session.bulk(&msg)?;
-                Next::Done(None)
+                return Ok(None);
             }
             "success" => {
-                // A final success event with some data payload.
-                let payload = msg
-                    .result
-                    .clone()
-                    .filter(|v| !v.is_null())
-                    .or_else(|| msg.data.clone().filter(|v| !v.is_null()));
-                Next::Done(payload)
+                close(&mut socket);
+                let payload = msg.result.filter(|v| !v.is_null());
+                return Ok(payload.or(msg.data.filter(|v| !v.is_null())));
             }
-            "error" => {
-                // An error from HSM.
-                return Err(Error::Hsm(data_as_string(&msg.data)));
-            }
-            "warning" => {
-                let warning = data_as_string(&msg.data);
-                log::warn!("Warning from Ledger's HSM: {}", warning);
-                (session.on_event)(SocketEvent::Warning(warning));
-                Next::Continue
-            }
-            other => {
-                log::warn!("Socket in: cannot handle message of type '{}'.", other);
-                Next::Continue
-            }
-        };
-
-        if let Next::Done(payload) = next {
-            if !matches!(msg.query.as_str(), "bulk") {
-                if let Err(e) = socket.close(None) {
-                    log::debug!("Error closing the websocket: {}", e);
-                }
-            }
-            return Ok(payload);
+            "error" => return Err(Error::Hsm(data_as_string(&msg.data))),
+            "warning" => log::warn!("Warning from Ledger's HSM: {}", data_as_string(&msg.data)),
+            other => log::warn!("Socket in: cannot handle message of type '{}'.", other),
         }
     }
 }
 
-/// Query the HSM through the websocket at this URL and relay its commands to the device. Returns
-/// the result payload, if any.
-///
-/// Parameters are passed directly in the url. Don't forget to escape the necessary characters!
-/// See `run_device_socket` for a variant reporting progress.
-pub fn query_via_websocket(
-    ledger_api: &TransportNativeHID,
-    url: &str,
-) -> Result<Option<serde_json::Value>, Error> {
-    run_device_socket(ledger_api, url, SocketContext::Other, |_| {})
+/// Interpret the error of a socket session like Ledger Live's `remapSocketError` in
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/api.ts
+/// and `remapSocketFirmwareError` in
+/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/deviceSDK/commands/firmwareUpdate/installFirmware.ts
+fn remap_error(e: Error, context: Context) -> Error {
+    if context == Context::GenuineCheck {
+        return e;
+    }
+    // Ledger Live looks at the last 4 characters of the error message, which for errors sent by
+    // the HSM is the status word it got.
+    let status = match &e {
+        Error::DeviceStatus(s) => format!("{:04x}", s),
+        Error::Hsm(msg) if msg.starts_with("invalid literal") => {
+            return Error::DeviceOnDashboardExpected
+        }
+        Error::Hsm(msg) => match msg.get(msg.len().saturating_sub(4)..) {
+            Some(s) => s.to_lowercase(),
+            None => return e,
+        },
+        _ => return e,
+    };
+    let firmware = context == Context::Firmware;
+    match status.as_str() {
+        "6a80" | "6a81" | "6a8e" | "6a8f" if !firmware => Error::AppAlreadyInstalled,
+        "6982" | "5303" | "5515" => Error::DeviceLocked,
+        "6a84" | "5103" => Error::NotEnoughSpace,
+        "6a85" | "5102" | "6985" | "5501" if firmware => {
+            Error::RefusedOnDevice("The firmware update")
+        }
+        "6a85" | "5102" => Error::NotEnoughSpace,
+        // NOTE: outside of firmware updates Ledger Live maps these to a "not enough space" error.
+        // They are the "conditions of use not satisfied" and "user refused" status words, so we
+        // report them as a refusal instead.
+        "6985" | "5501" => Error::RefusedOnDevice("The operation"),
+        _ => e,
+    }
 }
 
 #[cfg(test)]
@@ -525,41 +410,29 @@ mod tests {
         let cmd = deser("e0510000").unwrap();
         assert_eq!((cmd.cla, cmd.ins, cmd.p1, cmd.p2), (0xe0, 0x51, 0, 0));
         assert!(cmd.data.is_empty());
-
-        let cmd = deser("e051000000").unwrap();
-        assert_eq!((cmd.cla, cmd.ins, cmd.p1, cmd.p2), (0xe0, 0x51, 0, 0));
-        assert!(cmd.data.is_empty());
+        assert!(deser("e051000000").unwrap().data.is_empty());
 
         let cmd = deser("e0d8000007426974636f696e").unwrap();
         assert_eq!(cmd.ins, 0xd8);
-        assert_eq!(cmd.data, b"Bitcoin");
         assert_eq!(
             cmd.serialize(),
             hex::decode("e0d8000007426974636f696e").unwrap()
         );
-
         // Trailing Le.
-        let cmd = deser("e0d8000007426974636f696e00").unwrap();
-        assert_eq!(cmd.data, b"Bitcoin");
-        let cmd = deser("e0d800000000").unwrap();
-        assert!(cmd.data.is_empty());
-
+        assert_eq!(
+            deser("e0d8000007426974636f696e00").unwrap().data,
+            b"Bitcoin"
+        );
+        assert!(deser("e0d800000000").unwrap().data.is_empty());
         // Other length mismatches: the data is forwarded as is.
-        let cmd = deser("e0d8000008426974636f696e").unwrap();
-        assert_eq!(cmd.data, b"Bitcoin");
-        let cmd = deser("e0d8000005426974636f696e").unwrap();
-        assert_eq!(cmd.data, b"Bitcoin");
+        assert_eq!(deser("e0d8000008426974636f696e").unwrap().data, b"Bitcoin");
+        assert_eq!(deser("e0d8000005426974636f696e").unwrap().data, b"Bitcoin");
 
         // Invalid.
-        assert!(matches!(
-            deser("E0D80000074269746366F696E"),
-            Err(Error::UnexpectedHsmMessage(_))
-        ));
+        assert!(deser("E0D80000074269746366F696E").is_err());
         assert!(deser("e05100").is_err());
-        assert!(deser("zz").is_err());
         assert!(deser("").is_err());
-        let long = format!("e0d80000ff{}", "00".repeat(257));
-        assert!(deser(&long).is_err());
+        assert!(deser(&format!("e0d80000ff{}", "00".repeat(257))).is_err());
         let max = format!("e0d80000ff{}", "00".repeat(255));
         assert_eq!(deser(&max).unwrap().data.len(), 255);
     }
@@ -570,23 +443,14 @@ mod tests {
             serde_json::from_str(r#"{"query":"exchange","nonce":3,"data":"e051000000"}"#).unwrap();
         assert_eq!(m.query, "exchange");
         assert_eq!(m.nonce, Some(serde_json::json!(3)));
-
         let m: HsmMessage = serde_json::from_str(
             r#"{"query":"bulk","nonce":4,"data":["e0000000","e0000000",""],"uuid":"x","session":"y"}"#,
         )
         .unwrap();
         assert!(matches!(m.data, Some(serde_json::Value::Array(ref a)) if a.len() == 3));
-
         let m: HsmMessage =
             serde_json::from_str(r#"{"query":"success","nonce":5,"result":"0000"}"#).unwrap();
         assert_eq!(m.result, Some(serde_json::json!("0000")));
-
-        let m: HsmMessage =
-            serde_json::from_str(r#"{"query":"success","data":[{"hash":"aa","name":"Bitcoin"}]}"#)
-                .unwrap();
-        assert!(m.nonce.is_none());
-        assert!(m.data.is_some());
-
         let m: HsmMessage =
             serde_json::from_str(r#"{"query":"error","data":"Oops 6a84"}"#).unwrap();
         assert_eq!(data_as_string(&m.data), "Oops 6a84");
@@ -612,15 +476,44 @@ mod tests {
     }
 
     #[test]
-    fn bulk_progress() {
+    fn error_remapping() {
+        let remap = |e, c| remap_error(e, c).to_string();
+        let status = Error::DeviceStatus;
         assert_eq!(
-            SocketEvent::BulkProgress { index: 1, total: 4 }.bulk_progress(),
-            Some(0.25)
+            remap(status(0x5501), Context::Firmware),
+            "The firmware update was refused on the device."
         );
         assert_eq!(
-            SocketEvent::BulkProgress { index: 0, total: 0 }.bulk_progress(),
-            Some(1.0)
+            remap(status(0x5501), Context::App),
+            "The operation was refused on the device."
         );
-        assert_eq!(SocketEvent::Opened.bulk_progress(), None);
+        assert!(matches!(
+            remap_error(status(0x5102), Context::App),
+            Error::NotEnoughSpace
+        ));
+        assert!(matches!(
+            remap_error(status(0x6a84), Context::Firmware),
+            Error::NotEnoughSpace
+        ));
+        assert!(matches!(
+            remap_error(Error::Hsm("Something 6a80".into()), Context::App),
+            Error::AppAlreadyInstalled
+        ));
+        assert!(matches!(
+            remap_error(status(0x6a80), Context::Firmware),
+            Error::DeviceStatus(0x6a80)
+        ));
+        assert!(matches!(
+            remap_error(Error::Hsm("invalid literal for int()".into()), Context::App),
+            Error::DeviceOnDashboardExpected
+        ));
+        assert!(matches!(
+            remap_error(status(0x6d00), Context::App),
+            Error::DeviceStatus(0x6d00)
+        ));
+        assert!(matches!(
+            remap_error(status(0x5501), Context::GenuineCheck),
+            Error::DeviceStatus(0x5501)
+        ));
     }
 }

@@ -259,7 +259,7 @@ fn probe(loaded: Option<String>) -> TaskResult {
     };
     let found: Vec<Detected> = ledger_manager::list_ledger_devices(&api)
         .into_iter()
-        .map(|d| Detected::Ledger(d.path))
+        .map(Detected::Ledger)
         .chain(
             bitbox_manager::list_devices(&api)
                 .into_iter()

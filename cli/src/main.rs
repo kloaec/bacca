@@ -10,15 +10,13 @@ use std::{
 
 use ledger_manager::{
     check_firmware_update_supported, current_firmware, default_backup_dir, find_latest_backup,
-    firmware_update_resets_customization, genuine_check_with_events,
-    install_bitcoin_app_with_progress, latest_firmware,
+    firmware_update_resets_customization, genuine_check, install_bitcoin_app, latest_firmware,
     ledger_transport_hidapi::{hidapi::HidApi, TransportNativeHID},
     list_installed_apps, load_backup, open_bitcoin_app, open_device, repair_firmware,
-    restore_device_settings, update_bitcoin_app_with_progress, update_firmware,
-    update_firmware_and_restore, AppInstallStep, BackupLocation, BackupStep, DeviceInfo,
-    DeviceModel, Error, FirmwareUpdateOptions, FirmwareUpdateStep, InstallErr, LanguageInstallStep,
-    LoadImageStep, RestoreReport, RestoreStep, SocketEvent, UpdateAndRestoreOptions,
-    UpdateAndRestoreStep, UpdateErr,
+    restore_device_settings, update_bitcoin_app, update_firmware, update_firmware_and_restore,
+    AppInstallStep, BackupStep, DeviceInfo, DeviceModel, Error, FirmwareUpdateStep,
+    LanguageInstallStep, LoadImageStep, RestoreReport, RestoreStep, SocketEvent,
+    UpdateAndRestoreStep,
 };
 
 // Print on stderr and exit with 1.
@@ -174,7 +172,7 @@ fn print_ledger_info(ledger_api: &TransportNativeHID, usb_model: Option<DeviceMo
 
 fn perform_genuine_check(ledger_api: &TransportNativeHID) {
     println!("Querying Ledger's remote HSM to perform the genuine check. You might have to confirm the operation on your device.");
-    if let Err(e) = genuine_check_with_events(ledger_api, |e| {
+    if let Err(e) = genuine_check(ledger_api, |e| {
         if e == SocketEvent::DevicePermissionRequested {
             println!("Please allow the Ledger manager on your device.");
         }
@@ -187,26 +185,24 @@ fn perform_genuine_check(ledger_api: &TransportNativeHID) {
 // Install the Bitcoin app on the device.
 fn install_app(ledger_api: &TransportNativeHID, is_testnet: bool) {
     println!("You may have to allow on your device 1) listing installed apps 2) the Ledger manager to install the app.");
-    match install_bitcoin_app_with_progress(ledger_api, is_testnet, print_app_step) {
+    match install_bitcoin_app(ledger_api, is_testnet, print_app_step) {
         Ok(()) => println!("Successfully installed the app."),
-        Err(InstallErr::AlreadyInstalled) => {
+        Err(Error::AppAlreadyInstalled) => {
             error!("Bitcoin app already installed. Use the update command to update it.")
         }
-        Err(InstallErr::AppNotFound) => error!("Could not get info about Bitcoin app."),
-        Err(InstallErr::Any(e)) => error!("Error installing Bitcoin app: {}", e),
+        Err(e) => error!("Error installing Bitcoin app: {}", e),
     }
 }
 
 fn update_app(ledger_api: &TransportNativeHID, is_testnet: bool) {
     println!("You may have to allow on your device 1) listing installed apps 2) the Ledger manager to install the app.");
-    match update_bitcoin_app_with_progress(ledger_api, is_testnet, print_app_step) {
+    match update_bitcoin_app(ledger_api, is_testnet, print_app_step) {
         Ok(()) => println!("Successfully updated the app."),
-        Err(UpdateErr::NotInstalled) => {
+        Err(Error::AppNotInstalled) => {
             error!("Bitcoin app isn't installed. Use the install command instead.")
         }
-        Err(UpdateErr::AppNotFound) => error!("Could not get info about Bitcoin app."),
-        Err(UpdateErr::AlreadyLatest) => error!("Bitcoin app is already at the latest version."),
-        Err(UpdateErr::Any(e)) => error!("Error updating Bitcoin app: {}", e),
+        Err(Error::AppAlreadyLatest) => error!("Bitcoin app is already at the latest version."),
+        Err(e) => error!("Error updating Bitcoin app: {}", e),
     }
 }
 
@@ -312,12 +308,12 @@ fn update_firm(mut hid_api: HidApi) {
         return;
     }
 
-    let backup_location = if env::var("LEDGER_NO_BACKUP_FILE").is_ok() {
+    let backup_dir = if env::var("LEDGER_NO_BACKUP_FILE").is_ok() {
         println!("LEDGER_NO_BACKUP_FILE is set: the backup of the device settings is only kept in memory, it will be lost if the update is interrupted.");
-        BackupLocation::MemoryOnly
+        None
     } else {
         match backup_dir() {
-            Some(dir) => BackupLocation::Directory(dir),
+            Some(dir) => Some(dir),
             None => error!("Could not determine where to save the backup of the device settings. Set LEDGER_BACKUP_DIR to a directory, or set LEDGER_NO_BACKUP_FILE=1 to update without saving the backup to a file."),
         }
     };
@@ -328,11 +324,12 @@ fn update_firm(mut hid_api: HidApi) {
     }
     println!("Keep your device connected and unlocked during the whole update. It can take several minutes.");
 
-    let options = UpdateAndRestoreOptions {
-        backup_location,
-        firmware: FirmwareUpdateOptions::default(),
-    };
-    let res = update_firmware_and_restore(&mut hid_api, &update, &options, print_update_step);
+    let res = update_firmware_and_restore(
+        &mut hid_api,
+        &update,
+        backup_dir.as_deref(),
+        print_update_step,
+    );
     match res {
         Ok(result) => {
             println!("Successfully updated the firmware to {}.", result.device_info.version);
@@ -402,7 +399,6 @@ fn print_backup_step(step: BackupStep) {
         BackupStep::ListingApps => println!(
             "Backing up the list of installed apps. You might have to allow the Ledger manager on your device."
         ),
-        BackupStep::QueryingApi => println!("Querying the Ledger API."),
         BackupStep::FetchingLockScreen => println!(
             "Backing up the lock screen picture. If your device asks for it, approve the backup on your device."
         ),
@@ -444,7 +440,7 @@ fn print_restore_step(step: RestoreStep) {
             println!("Installing {} ({}/{}).", name, index, total)
         }
         RestoreStep::App(step) => print_app_step(step),
-        RestoreStep::Done { .. } => {}
+        RestoreStep::Done => {}
     }
 }
 

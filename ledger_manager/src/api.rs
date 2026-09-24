@@ -1,32 +1,43 @@
-//! HTTP requests to the Ledger Manager API (the API used by Ledger Live to get information about
-//! firmwares and applications).
+//! HTTP requests to the Ledger Manager API, used by Ledger Live to get information about the
+//! firmwares and the apps.
 //!
 //! Endpoints and parameters are taken from
 //! https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/repositories/HttpManagerApiRepository.ts
 //! and https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/api.ts
+//! The entities are defined in
+//! https://github.com/LedgerHQ/ledger-live/tree/develop/libs/device-core/src/managerApi/entities
+//! Only the fields we use are parsed.
 
 use crate::{
-    error::Error, version::SemVer, DeviceInfo, BASE_API_V1_URL, BASE_API_V2_URL,
-    LIVE_COMMON_VERSION,
+    device::{coerce_version, DeviceInfo},
+    error::Error,
 };
 
-use form_urlencoded::Serializer as UrlSerializer;
 use serde::{de::DeserializeOwned, Deserializer};
 use serde_derive::Deserialize;
 
-/// The salt used by Ledger Live for the incremental deployment of firmware updates. It is derived
-/// from the `USER_ID` of the Ledger Live instance as `sha256(USER_ID + "|firmwareSalt")`, hex
-/// encoded, truncated to 6 characters. See
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/use-cases/getUserHashes.ts
-/// We use the default (empty) `USER_ID` of Ledger Live
-/// (https://github.com/LedgerHQ/ledger-live/blob/develop/shared/env/src/definitions/team-live-devices/index.ts),
-/// which gives sha256("|firmwareSalt") = 544d897c...
-pub const FIRMWARE_SALT: &str = "544d89";
+/// The Ledger Live API requires requests to set their claimed version of Ledger Live. This is the
+/// version of ledger-live-common at the time of writing
+/// (https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/package.json).
+pub(crate) const LIVE_COMMON_VERSION: &str = "38.0.0";
 
-/// Build a URL with the given query parameters, properly escaped. `livecommonversion` is always
-/// added first, as Ledger Live does.
+/// The Ledger Live API has multiple channels ("providers") to download binaries. 1 is the
+/// default, see `DeviceInfo::provider` for the others.
+pub(crate) const DEFAULT_PROVIDER: u32 = 1;
+
+pub(crate) const BASE_API_V1_URL: &str = "https://manager.api.live.ledger.com/api";
+const BASE_API_V2_URL: &str = "https://manager.api.live.ledger.com/api/v2";
+
+/// The salt used by Ledger Live for the incremental deployment of firmware updates:
+/// `sha256(USER_ID + "|firmwareSalt")`, hex encoded, truncated to 6 characters (see
+/// libs/device-core/src/managerApi/use-cases/getUserHashes.ts). We use the default (empty)
+/// `USER_ID` of Ledger Live, which gives sha256("|firmwareSalt") = 544d897c...
+const FIRMWARE_SALT: &str = "544d89";
+
+/// A URL with these query parameters, escaped. `livecommonversion` is added first, as Ledger Live
+/// does.
 pub(crate) fn url_with_params(base: &str, params: &[(&str, &str)]) -> String {
-    let mut ser = UrlSerializer::new(String::new());
+    let mut ser = form_urlencoded::Serializer::new(String::new());
     ser.append_pair("livecommonversion", LIVE_COMMON_VERSION);
     for (k, v) in params {
         ser.append_pair(k, v);
@@ -34,64 +45,48 @@ pub(crate) fn url_with_params(base: &str, params: &[(&str, &str)]) -> String {
     format!("{}?{}", base, ser.finish())
 }
 
-fn check_status(resp: &minreq::Response, url: &str) -> Result<(), Error> {
+fn check_status(resp: minreq::Response, url: &str) -> Result<minreq::Response, Error> {
     if (200..300).contains(&resp.status_code) {
-        Ok(())
-    } else {
-        log::debug!(
-            "Ledger API error {} for {}: {}",
-            resp.status_code,
-            url,
-            resp.as_str().unwrap_or("<non-utf8 body>")
-        );
-        Err(Error::Api {
-            status: resp.status_code,
-            url: url.to_string(),
-        })
+        return Ok(resp);
     }
-}
-
-fn parse_json<T: DeserializeOwned>(resp: &minreq::Response) -> Result<T, Error> {
-    Ok(serde_json::from_slice(resp.as_bytes())?)
+    log::debug!(
+        "Ledger API error {} for {}: {}",
+        resp.status_code,
+        url,
+        resp.as_str().unwrap_or("<non-utf8 body>")
+    );
+    Err(Error::Api {
+        status: resp.status_code,
+        url: url.to_string(),
+    })
 }
 
 pub(crate) fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
     log::debug!("GET {}", url);
-    let resp = minreq::get(url).send()?;
-    check_status(&resp, url)?;
-    parse_json(&resp)
-}
-
-/// Same as `get_json` but a 404 is turned into `Error::FirmwareNotRecognized`, as Ledger Live does
-/// for `get_device_version` and `get_firmware_version`.
-fn get_json_firmware<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
-    match get_json(url) {
-        Err(Error::Api { status: 404, .. }) => Err(Error::FirmwareNotRecognized),
-        r => r,
-    }
+    let resp = check_status(minreq::get(url).send()?, url)?;
+    Ok(serde_json::from_slice(resp.as_bytes())?)
 }
 
 /// GET a text document (e.g. the APDUs of a language pack).
 pub(crate) fn get_text(url: &str) -> Result<String, Error> {
     log::debug!("GET {}", url);
-    let resp = minreq::get(url).send()?;
-    check_status(&resp, url)?;
-    resp.as_str().map(|s| s.to_string()).map_err(Error::Http)
+    let resp = check_status(minreq::get(url).send()?, url)?;
+    Ok(resp.as_str()?.to_string())
 }
 
-pub(crate) fn post_json<T: DeserializeOwned>(
-    url: &str,
-    body: &serde_json::Value,
-) -> Result<T, Error> {
-    log::debug!("POST {}", url);
-    let resp = minreq::post(url).with_json(body)?.send()?;
-    check_status(&resp, url)?;
-    parse_json(&resp)
+/// Like `get_json`, but a 404 means the API doesn't know the firmware, as in Ledger Live.
+fn get_firmware_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
+    match get_json(url) {
+        Err(Error::Api { status: 404, .. }) => Err(Error::Other(
+            "The Ledger API did not recognize this device's firmware.".into(),
+        )),
+        r => r,
+    }
 }
 
-/// Deserialize a field which may be missing or explicitly `null` as its default value. The Ledger
-/// API is not consistent about it and Ledger Live treats most of these fields as nullable (e.g.
-/// `mcuVersion.from_bootloader_version ?? ""` in hw/flash.ts). Use along with `#[serde(default)]`.
+/// Deserialize a field which may be missing or `null` as its default value. The Ledger API is
+/// not consistent about it and Ledger Live treats most of these fields as nullable (e.g.
+/// `mcuVersion.from_bootloader_version ?? ""` in hw/flash.ts). Use with `#[serde(default)]`.
 pub(crate) fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -101,137 +96,79 @@ where
     Ok(value.unwrap_or_default())
 }
 
-/// A "device version", as the Ledger API calls a hardware version of a device model.
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/entities/DeviceVersionEntity.ts
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeviceVersion {
-    pub id: i64,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub target_id: Option<serde_json::Value>,
-    #[serde(default)]
-    pub device: Option<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub providers: Vec<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub mcu_versions: Vec<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub se_firmware_final_versions: Vec<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub osu_versions: Vec<i64>,
+/// Parse the entries of a list one by one: an entry which can't be parsed is skipped (with a
+/// warning) rather than failing the whole list, which could prevent updating any device.
+fn parse_list<T: DeserializeOwned>(entries: Vec<serde_json::Value>) -> Vec<T> {
+    entries
+        .into_iter()
+        .filter_map(|e| {
+            serde_json::from_value(e.clone())
+                .map_err(|err| log::warn!("Skipping entry from the Ledger API ({}): {}", err, e))
+                .ok()
+        })
+        .collect()
 }
 
-/// An OS Updater firmware: the firmware installed on the device to perform a firmware update.
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/entities/FirmwareUpdateContextEntity.ts
+/// A "device version", as the Ledger API calls a hardware version of a model.
+#[derive(Debug, Clone, Deserialize)]
+struct DeviceVersion {
+    id: i64,
+}
+
+/// An OS Updater: the firmware installed on the device to perform a firmware update.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OsuFirmware {
     pub id: i64,
     pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub notes: Option<String>,
     pub perso: String,
     pub firmware: String,
     pub firmware_key: String,
+    /// The identifier the device displays for the user to confirm the update.
     #[serde(default)]
     pub hash: Option<String>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub device_versions: Vec<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub providers: Vec<i64>,
     pub next_se_firmware_final_version: i64,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub previous_se_firmware_final_version: Vec<i64>,
 }
 
-/// A final firmware, as known by the Ledger API.
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/entities/FirmwareUpdateContextEntity.ts
+/// A final firmware: what the device runs after an update.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FinalFirmware {
     pub id: i64,
-    /// The firmware version name, e.g. "2.2.3".
+    /// The version, e.g. "2.2.3".
     pub name: String,
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
     pub perso: String,
-    /// The firmware to install. Empty for most firmwares: the OSU installs the final firmware
-    /// itself. See `has_final_firmware`.
+    /// The firmware to install after the OSU, on legacy devices. Empty for most firmwares: the OSU
+    /// installs the final firmware itself.
     #[serde(default)]
     pub firmware: Option<String>,
     #[serde(default)]
     pub firmware_key: Option<String>,
-    #[serde(default)]
-    pub hash: Option<String>,
-    #[serde(default)]
-    pub se_firmware: Option<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub device_versions: Vec<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub providers: Vec<i64>,
+    /// The ids of the MCU versions this firmware runs with.
     #[serde(default, deserialize_with = "null_as_default")]
     pub mcu_versions: Vec<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub application_versions: Vec<i64>,
-    #[serde(default)]
-    pub bytes: Option<u64>,
 }
 
 impl FinalFirmware {
     /// Whether the final firmware must be installed separately after the OSU (legacy flow).
     /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/hasFinalFirmware.ts
-    pub fn has_final_firmware(&self) -> bool {
-        self.firmware
-            .as_deref()
-            .map(|f| !f.is_empty())
-            .unwrap_or(false)
+    pub(crate) fn has_final_firmware(&self) -> bool {
+        self.firmware.as_deref().is_some_and(|f| !f.is_empty())
     }
 }
 
-/// Information about a firmware version, as queried from the Ledger API. Kept for backward
-/// compatibility, this is the current final firmware of the device.
-pub type FirmwareInfo = FinalFirmware;
-
-/// A MCU firmware version.
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/types-live/src/manager.ts
+/// A MCU firmware version (libs/types-live/src/manager.ts).
 #[derive(Debug, Clone, Deserialize)]
 pub struct McuVersion {
     pub id: i64,
-    #[serde(default)]
-    pub mcu: Option<i64>,
     pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub providers: Vec<i64>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub from_bootloader_version: String,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub device_versions: Vec<i64>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub se_firmware_final_versions: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct LatestFirmwareResponse {
-    result: String,
-    #[serde(default)]
-    se_firmware_osu_version: Option<OsuFirmware>,
-}
-
-/// Get the device version for this target id.
-pub fn get_device_version(target_id: u32, provider: u32) -> Result<DeviceVersion, Error> {
+fn get_device_version(target_id: u32, provider: u32) -> Result<DeviceVersion, Error> {
     let url = url_with_params(
         &format!("{}/get_device_version", BASE_API_V1_URL),
         &[
@@ -239,11 +176,16 @@ pub fn get_device_version(target_id: u32, provider: u32) -> Result<DeviceVersion
             ("target_id", &target_id.to_string()),
         ],
     );
-    get_json_firmware(&url)
+    get_firmware_json(&url)
 }
 
-/// Get the final firmware information for this version name ("2.2.3") and device version id.
-pub fn get_current_firmware(
+/// The id of the device version of this target id.
+pub(crate) fn device_version_id(target_id: u32, provider: u32) -> Result<i64, Error> {
+    Ok(get_device_version(target_id, provider)?.id)
+}
+
+/// The final firmware of this version name ("2.2.3") for this device version.
+pub(crate) fn get_final_firmware(
     version: &str,
     device_version_id: i64,
     provider: u32,
@@ -256,12 +198,11 @@ pub fn get_current_firmware(
             ("provider", &provider.to_string()),
         ],
     );
-    get_json_firmware(&url)
+    get_firmware_json(&url)
 }
 
-/// Get the OSU firmware for this version name ("2.2.3", without the "-osu" suffix) and device
-/// version id.
-pub fn get_current_osu(
+/// The OSU of this version name ("2.2.3", without the "-osu" suffix) for this device version.
+pub(crate) fn get_osu(
     version: &str,
     device_version_id: i64,
     provider: u32,
@@ -277,33 +218,7 @@ pub fn get_current_osu(
     get_json(&url)
 }
 
-/// Get the OSU firmware of the next available firmware, if any.
-pub fn get_latest_firmware(
-    current_se_firmware_final_version: i64,
-    device_version_id: i64,
-    provider: u32,
-) -> Result<Option<OsuFirmware>, Error> {
-    let url = url_with_params(
-        &format!("{}/get_latest_firmware", BASE_API_V1_URL),
-        &[
-            ("salt", FIRMWARE_SALT),
-            (
-                "current_se_firmware_final_version",
-                &current_se_firmware_final_version.to_string(),
-            ),
-            ("device_version", &device_version_id.to_string()),
-            ("provider", &provider.to_string()),
-        ],
-    );
-    let resp: LatestFirmwareResponse = get_json(&url)?;
-    if resp.result == "null" {
-        return Ok(None);
-    }
-    Ok(resp.se_firmware_osu_version)
-}
-
-/// Get a final firmware by its id.
-pub fn get_final_firmware_by_id(id: i64) -> Result<FinalFirmware, Error> {
+pub(crate) fn get_final_firmware_by_id(id: i64) -> Result<FinalFirmware, Error> {
     let url = url_with_params(
         &format!("{}/firmware_final_versions/{}", BASE_API_V1_URL, id),
         &[],
@@ -311,35 +226,20 @@ pub fn get_final_firmware_by_id(id: i64) -> Result<FinalFirmware, Error> {
     get_json(&url)
 }
 
-/// Parse the list of MCU versions element by element: an entry which can't be parsed is skipped
-/// (with a warning) rather than failing the whole list, as it would otherwise prevent firmware
-/// updates for every device.
-pub(crate) fn parse_mcus(entries: Vec<serde_json::Value>) -> Vec<McuVersion> {
-    entries
-        .into_iter()
-        .filter_map(|e| match serde_json::from_value::<McuVersion>(e.clone()) {
-            Ok(mcu) => Some(mcu),
-            Err(err) => {
-                log::warn!("Skipping MCU version from the Ledger API ({}): {}", err, e);
-                None
-            }
-        })
-        .collect()
-}
-
 /// Get all the MCU versions.
 pub fn fetch_mcus() -> Result<Vec<McuVersion>, Error> {
     let url = url_with_params(&format!("{}/mcu_versions", BASE_API_V1_URL), &[]);
-    Ok(parse_mcus(get_json(&url)?))
+    Ok(parse_list(get_json(&url)?))
 }
 
-/// Find the MCU with the highest version.
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/api.ts (`findBestMCU`)
-pub fn find_best_mcu(mcus: &[McuVersion]) -> Option<&McuVersion> {
-    let mut best = mcus.first()?;
-    for mcu in &mcus[1..] {
-        let (a, b) = (SemVer::coerce(&mcu.name), SemVer::coerce(&best.name));
-        if let (Some(a), Some(b)) = (a, b) {
+/// The MCU with the highest version (`findBestMCU` in manager/api.ts).
+pub(crate) fn find_best_mcu<'a>(
+    mcus: impl IntoIterator<Item = &'a McuVersion>,
+) -> Option<&'a McuVersion> {
+    let mut mcus = mcus.into_iter();
+    let mut best = mcus.next()?;
+    for mcu in mcus {
+        if let (Some(a), Some(b)) = (coerce_version(&mcu.name), coerce_version(&best.name)) {
             if a > b {
                 best = mcu;
             }
@@ -348,25 +248,20 @@ pub fn find_best_mcu(mcus: &[McuVersion]) -> Option<&McuVersion> {
     Some(best)
 }
 
-/// Among all MCU versions, find the best one to flash for this final firmware.
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/hw/flash.ts
-pub(crate) fn mcus_for_final_firmware(
-    mcus: &[McuVersion],
+/// The best MCU to flash for this final firmware (hw/flash.ts).
+pub(crate) fn best_mcu_for_final_firmware<'a>(
+    mcus: &'a [McuVersion],
     final_firmware: &FinalFirmware,
     provider: u32,
-) -> Vec<McuVersion> {
-    mcus.iter()
-        .filter(|m| {
-            m.providers.contains(&(provider as i64))
-                && m.from_bootloader_version != "none"
-                && final_firmware.mcu_versions.contains(&m.id)
-        })
-        .cloned()
-        .collect()
+) -> Option<&'a McuVersion> {
+    find_best_mcu(mcus.iter().filter(|m| {
+        m.providers.contains(&(provider as i64))
+            && m.from_bootloader_version != "none"
+            && final_firmware.mcu_versions.contains(&m.id)
+    }))
 }
 
 /// A firmware update available for a device.
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/entities/FirmwareUpdateContextEntity.ts
 #[derive(Debug, Clone)]
 pub struct FirmwareUpdateInfo {
     /// The OS updater to install on the device.
@@ -382,52 +277,51 @@ impl FirmwareUpdateInfo {
     pub fn version(&self) -> &str {
         &self.final_firmware.name
     }
-
-    /// The version of the OSU, without the "-osu" suffix.
-    /// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/ledger-live-common/src/manager/index.ts (`getFirmwareVersion`)
-    pub fn osu_version(&self) -> String {
-        self.osu.name.replace("-osu", "")
-    }
-
-    /// Whether a final firmware must be installed separately after the OSU (legacy devices).
-    pub fn has_final_firmware(&self) -> bool {
-        self.final_firmware.has_final_firmware()
-    }
 }
 
 /// Get the firmware update available for this device, if any.
-///
 /// Ported from https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/use-cases/getLatestFirmwareForDevice.ts
 pub fn latest_firmware(device_info: &DeviceInfo) -> Result<Option<FirmwareUpdateInfo>, Error> {
     if device_info.is_bootloader {
         return Err(Error::DeviceInBootloader);
     }
-    let provider = device_info.provider_id();
-    let device_version = get_device_version(device_info.target_id, provider)?;
-
+    let provider = device_info.provider;
+    let device_version = device_version_id(device_info.target_id, provider)?;
     let osu = if device_info.is_osu {
-        Some(get_current_osu(
-            &device_info.version,
-            device_version.id,
-            provider,
-        )?)
+        get_osu(&device_info.version, device_version, provider)?
     } else {
-        let current = get_current_firmware(&device_info.version, device_version.id, provider)?;
-        get_latest_firmware(current.id, device_version.id, provider)?
-    };
-    let osu = match osu {
-        Some(osu) => osu,
-        None => return Ok(None),
+        let current = get_final_firmware(&device_info.version, device_version, provider)?;
+        #[derive(Deserialize)]
+        struct LatestFirmwareResponse {
+            result: String,
+            #[serde(default)]
+            se_firmware_osu_version: Option<OsuFirmware>,
+        }
+        let url = url_with_params(
+            &format!("{}/get_latest_firmware", BASE_API_V1_URL),
+            &[
+                ("salt", FIRMWARE_SALT),
+                ("current_se_firmware_final_version", &current.id.to_string()),
+                ("device_version", &device_version.to_string()),
+                ("provider", &provider.to_string()),
+            ],
+        );
+        let resp: LatestFirmwareResponse = get_json(&url)?;
+        match resp.se_firmware_osu_version {
+            Some(osu) if resp.result != "null" => osu,
+            _ => return Ok(None),
+        }
     };
 
     let mcus = fetch_mcus()?;
     let current_mcu = mcus
         .iter()
         .find(|m| Some(m.name.as_str()) == device_info.mcu_version.as_deref())
-        .ok_or(Error::UnknownMcu)?;
+        .ok_or_else(|| {
+            Error::Other("The device's MCU version is unknown to the Ledger API.".into())
+        })?;
     let final_firmware = get_final_firmware_by_id(osu.next_se_firmware_final_version)?;
     let should_flash_mcu = !final_firmware.mcu_versions.contains(&current_mcu.id);
-
     Ok(Some(FirmwareUpdateInfo {
         osu,
         final_firmware,
@@ -437,70 +331,44 @@ pub fn latest_firmware(device_info: &DeviceInfo) -> Result<Option<FirmwareUpdate
 
 /// Get the current final firmware of this device.
 pub fn current_firmware(device_info: &DeviceInfo) -> Result<FinalFirmware, Error> {
-    let provider = device_info.provider_id();
-    let device_version = get_device_version(device_info.target_id, provider)?;
-    get_current_firmware(&device_info.version, device_version.id, provider)
+    let provider = device_info.provider;
+    let device_version = device_version_id(device_info.target_id, provider)?;
+    get_final_firmware(&device_info.version, device_version, provider)
 }
 
-impl FinalFirmware {
-    /// Get the current firmware of this device from the Ledger API.
-    pub fn from_device(device_info: &DeviceInfo) -> Result<Self, Error> {
-        current_firmware(device_info)
-    }
-}
-
-/// Information about an application as queried from the Ledger API (not the Ledger device).
-/// https://github.com/LedgerHQ/ledger-live/blob/develop/libs/device-core/src/managerApi/entities/AppEntity.ts (`ApplicationV2Entity`)
+/// An app, as known by the Ledger API (`ApplicationV2Entity`).
 #[derive(Debug, Clone, Deserialize)]
-pub struct BitcoinAppInfo {
-    /// The name of the application, e.g. "Bitcoin" or "Bitcoin Test".
-    #[serde(rename = "versionName")]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    /// The name of the app, e.g. "Bitcoin" or "Bitcoin Test".
     pub version_name: String,
-    #[serde(rename = "versionId")]
-    pub version_id: u32,
-    #[serde(rename = "versionDisplayName", default)]
-    pub version_display_name: Option<String>,
-    /// The version of the application, e.g. "2.1.3".
+    /// The version of the app, e.g. "2.1.3".
     pub version: String,
     pub perso: String,
-    /// The firmware used to uninstall the application.
+    /// The firmware used to uninstall the app.
     #[serde(default, deserialize_with = "null_as_default")]
     pub delete: String,
-    #[serde(rename = "deleteKey")]
     pub delete_key: String,
     pub firmware: String,
-    #[serde(rename = "firmwareKey")]
     pub firmware_key: String,
     pub hash: String,
-    /// The application this one depends on, if any.
-    #[serde(rename = "parentName", default)]
-    pub parent_name: Option<String>,
-    /// The size of the application.
-    #[serde(default)]
-    pub bytes: Option<u64>,
-    #[serde(default)]
-    pub warning: Option<String>,
 }
 
-// Returns a Vec of Options as some elements in the response's JSON array may be `null`.
-/// Get metadata about a list of Bitcoin apps identified by their hash. Elements returned seem to
-/// be in the same order as the hashes, with `None` for not found.
-pub fn bitcoin_apps_by_hashes(hashes: Vec<Vec<u8>>) -> Result<Vec<Option<BitcoinAppInfo>>, Error> {
+/// Get the apps with these hashes, in the same order. `None` for the ones the Ledger API doesn't
+/// know (e.g. sideloaded apps).
+pub fn apps_by_hashes(hashes: Vec<Vec<u8>>) -> Result<Vec<Option<AppInfo>>, Error> {
     if hashes.is_empty() {
         return Ok(Vec::new());
     }
-    let hashes_hex: Vec<_> = hashes
-        .into_iter()
-        .map(|h| serde_json::Value::String(hex::encode(h)))
-        .collect();
+    let hashes: Vec<String> = hashes.into_iter().map(hex::encode).collect();
     let url = url_with_params(&format!("{}/apps/hash", BASE_API_V2_URL), &[]);
-    let apps: Vec<serde_json::Value> = post_json(&url, &serde_json::Value::Array(hashes_hex))?;
+    log::debug!("POST {}", url);
+    let resp = check_status(minreq::post(&url).with_json(&hashes)?.send()?, &url)?;
+    let apps: Vec<serde_json::Value> = serde_json::from_slice(resp.as_bytes())?;
     Ok(apps
         .into_iter()
         .map(|a| {
-            if a.is_null() {
-                return None;
-            }
+            // Some elements may be `null`.
             serde_json::from_value(a)
                 .map_err(|e| log::debug!("Could not parse app from Ledger API: {}", e))
                 .ok()
@@ -508,59 +376,32 @@ pub fn bitcoin_apps_by_hashes(hashes: Vec<Vec<u8>>) -> Result<Vec<Option<Bitcoin
         .collect())
 }
 
-/// Information about any application of the catalog. `BitcoinAppInfo` is not specific to the
-/// Bitcoin apps, this is the same type.
-pub type AppInfo = BitcoinAppInfo;
-
-/// Fetch the raw catalog of applications available for this device.
-// This uses the v2 API. See for reference:
-// - https://github.com/LedgerHQ/ledger-live/blob/5a0a1aa5dc183116839851b79bceb6704f1de4b9/libs/ledger-live-common/src/apps/listApps/v2.ts
-// - https://github.com/LedgerHQ/ledger-live/blob/5a0a1aa5dc183116839851b79bceb6704f1de4b9/libs/device-core/src/managerApi/repositories/HttpManagerApiRepository.ts#L211
-fn fetch_catalog(device_info: &DeviceInfo) -> Result<Vec<serde_json::Value>, Error> {
+/// The apps with these names available for this device (running its current firmware), from the
+/// catalog of the v2 API. The other apps are not parsed.
+/// https://github.com/LedgerHQ/ledger-live/blob/5a0a1aa5dc183116839851b79bceb6704f1de4b9/libs/ledger-live-common/src/apps/listApps/v2.ts
+pub(crate) fn catalog_apps(
+    device_info: &DeviceInfo,
+    names: &[&str],
+) -> Result<Vec<AppInfo>, Error> {
     let url = url_with_params(
         &format!("{}/apps/by-target", BASE_API_V2_URL),
         &[
-            ("provider", &device_info.provider_id().to_string()),
+            ("provider", &device_info.provider.to_string()),
             ("target_id", &device_info.target_id.to_string()),
             ("firmware_version_name", &device_info.version),
         ],
     );
-    get_json(&url)
-}
-
-/// Parse the entries of the catalog, skipping (with a warning) the ones which can't be parsed.
-pub(crate) fn parse_catalog(entries: Vec<serde_json::Value>) -> Vec<AppInfo> {
-    entries
-        .into_iter()
-        .filter_map(|a| match serde_json::from_value::<AppInfo>(a) {
-            Ok(app) => Some(app),
-            Err(e) => {
-                log::warn!("Could not parse app from catalog: {}", e);
-                None
-            }
-        })
-        .collect()
-}
-
-/// Get the catalog of all the applications available for this device (for its current firmware).
-pub fn apps_catalog(device_info: &DeviceInfo) -> Result<Vec<AppInfo>, Error> {
-    device_info.check_normal_mode()?;
-    Ok(parse_catalog(fetch_catalog(device_info)?))
-}
-
-/// Get the catalog of applications available for this device. Only Bitcoin applications are
-/// kept, others are discarded (and not even parsed).
-pub(crate) fn bitcoin_apps_catalog(device_info: &DeviceInfo) -> Result<Vec<BitcoinAppInfo>, Error> {
-    let apps = fetch_catalog(device_info)?
-        .into_iter()
-        .filter(|a| {
-            a.get("versionName")
-                .and_then(|n| n.as_str())
-                .map(crate::apps::is_bitcoin_app_name)
-                .unwrap_or(false)
-        })
-        .collect();
-    Ok(parse_catalog(apps))
+    let entries: Vec<serde_json::Value> = get_json(&url)?;
+    Ok(parse_list(
+        entries
+            .into_iter()
+            .filter(|a| {
+                a.get("versionName")
+                    .and_then(|n| n.as_str())
+                    .is_some_and(|n| names.contains(&n))
+            })
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
@@ -587,23 +428,13 @@ mod tests {
 
     #[test]
     fn best_mcu() {
-        let mcu = |id, name: &str, from: &str, providers: Vec<i64>| McuVersion {
-            id,
-            mcu: None,
-            name: name.to_string(),
-            description: None,
-            providers,
-            from_bootloader_version: from.to_string(),
-            device_versions: vec![],
-            se_firmware_final_versions: vec![],
-        };
-        let mcus = vec![
-            mcu(1, "1.7", "0.11", vec![1]),
-            mcu(2, "1.12", "0.11", vec![1]),
-            mcu(3, "1.9", "0.11", vec![1]),
-            mcu(4, "2.30", "none", vec![1]),
-            mcu(5, "3.0", "0.11", vec![2]),
-        ];
+        let mcus: Vec<McuVersion> = parse_list(vec![
+            serde_json::json!({"id": 1, "name": "1.7", "from_bootloader_version": "0.11", "providers": [1]}),
+            serde_json::json!({"id": 2, "name": "1.12", "from_bootloader_version": "0.11", "providers": [1]}),
+            serde_json::json!({"id": 3, "name": "1.9", "from_bootloader_version": "0.11", "providers": [1]}),
+            serde_json::json!({"id": 4, "name": "2.30", "from_bootloader_version": "none", "providers": [1]}),
+            serde_json::json!({"id": 5, "name": "3.0", "from_bootloader_version": "0.11", "providers": [2]}),
+        ]);
         assert_eq!(find_best_mcu(&mcus[..3]).map(|m| m.id), Some(2));
         assert!(find_best_mcu(&[]).is_none());
 
@@ -617,12 +448,8 @@ mod tests {
         }))
         .unwrap();
         assert!(!final_fw.has_final_firmware());
-        let filtered = mcus_for_final_firmware(&mcus, &final_fw, 1);
-        assert_eq!(
-            filtered.iter().map(|m| m.id).collect::<Vec<_>>(),
-            vec![1, 3]
-        );
-        assert_eq!(find_best_mcu(&filtered).map(|m| m.id), Some(3));
+        let best = best_mcu_for_final_firmware(&mcus, &final_fw, 1);
+        assert_eq!(best.map(|m| m.id), Some(3));
     }
 
     #[test]
@@ -633,158 +460,58 @@ mod tests {
             "name": "2.6.0",
             "version": "2.6.0",
             "description": null,
-            "display_name": null,
             "notes": null,
             "perso": "perso_11",
             "firmware": null,
             "firmware_key": null,
             "hash": null,
-            "distribution_ratio": null,
-            "bytes": null,
             "se_firmware": 5,
             "device_versions": null,
             "providers": [1],
             "mcu_versions": null,
-            "application_versions": null,
             "osu_versions": [{"id": 1, "description": null, "hash": null}],
         }))
         .unwrap();
         assert!(!final_fw.has_final_firmware());
         assert!(final_fw.mcu_versions.is_empty());
-        assert!(final_fw.device_versions.is_empty());
-        assert_eq!(final_fw.providers, vec![1]);
 
         let osu: OsuFirmware = serde_json::from_value(serde_json::json!({
             "id": 1,
             "name": "2.2.3-to-2.6.0",
-            "description": null,
-            "display_name": null,
-            "notes": null,
             "perso": "perso_11",
             "firmware": "nanox/2.6.0/upgrade_osu",
             "firmware_key": "nanox/2.6.0/upgrade_osu_key",
             "hash": null,
-            "device_versions": null,
             "providers": null,
             "next_se_firmware_final_version": 521,
-            "previous_se_firmware_final_version": null,
         }))
         .unwrap();
         assert!(osu.hash.is_none());
-        assert!(osu.providers.is_empty());
 
-        let dv: DeviceVersion = serde_json::from_value(serde_json::json!({
-            "id": 17,
-            "name": null,
-            "providers": null,
-            "mcu_versions": null,
-            "se_firmware_final_versions": null,
-            "osu_versions": null,
-        }))
-        .unwrap();
-        assert!(dv.providers.is_empty() && dv.osu_versions.is_empty());
-    }
-
-    #[test]
-    fn mcus_parsing() {
-        let mcus = parse_mcus(vec![
+        // Invalid MCU entries are skipped.
+        let mcus: Vec<McuVersion> = parse_list(vec![
             serde_json::json!({
-                "id": 1,
-                "mcu": 1,
-                "name": "1.0",
-                "description": "",
-                "providers": [12],
-                "device_versions": [1, 2],
-                "from_bootloader_version": "",
-                "from_bootloader_version_id": 2,
-                "se_firmware_final_versions": [7, 12],
-                "date_creation": "2018-09-20T13:30:50.156394Z",
-                "date_last_modified": "2025-12-16T17:15:22.486525Z"
+                "id": 2, "mcu": null, "name": "2.30", "providers": null,
+                "from_bootloader_version": null, "se_firmware_final_versions": null,
             }),
-            // Nullable fields.
-            serde_json::json!({
-                "id": 2,
-                "mcu": null,
-                "name": "2.30",
-                "description": null,
-                "providers": null,
-                "device_versions": null,
-                "from_bootloader_version": null,
-                "from_bootloader_version_id": null,
-                "se_firmware_final_versions": null,
-            }),
-            // Invalid entries are skipped.
             serde_json::json!({"id": "three", "name": "1.1"}),
             serde_json::json!({"id": 4}),
             serde_json::Value::Null,
             serde_json::json!({"id": 5, "name": "2.12", "from_bootloader_version": "1.12"}),
         ]);
-        assert_eq!(mcus.iter().map(|m| m.id).collect::<Vec<_>>(), vec![1, 2, 5]);
-        assert_eq!(mcus[1].from_bootloader_version, "");
-        assert!(mcus[1].providers.is_empty());
-        assert_eq!(mcus[2].from_bootloader_version, "1.12");
+        assert_eq!(mcus.iter().map(|m| m.id).collect::<Vec<_>>(), vec![2, 5]);
+        assert_eq!(mcus[0].from_bootloader_version, "");
+        assert!(mcus[0].providers.is_empty());
     }
 
     #[test]
-    fn deserialize_api_entities() {
-        // Shapes from the ledger-live entity definitions and mocks (libs/device-core/src/managerApi/entities).
-        let dv: DeviceVersion = serde_json::from_value(serde_json::json!({
-            "name": "Ledger Nano S",
-            "device": 3,
-            "providers": [],
-            "id": 5,
-            "display_name": "Ledger Nano S",
-            "target_id": "0x31100004",
-            "description": "Ledger Nano S",
-            "mcu_versions": [1],
-            "se_firmware_final_versions": [2],
-            "osu_versions": [],
-            "application_versions": [],
-            "date_creation": "2020-04-30T13:50:00.000Z",
-            "date_last_modified": "2020-04-30T13:50:00.000Z"
-        }))
-        .unwrap();
-        assert_eq!(dv.id, 5);
-
-        let osu: OsuFirmware = serde_json::from_value(serde_json::json!({
-            "id": 0,
-            "name": "2.2.0-osu",
-            "display_name": "",
-            "notes": null,
-            "perso": "perso_11",
-            "firmware": "nanox/2.2.0/upgrade_osu_2.2.0",
-            "firmware_key": "nanox/2.2.0/upgrade_osu_2.2.0_key",
-            "hash": "abcd",
-            "device_versions": [],
-            "next_se_firmware_final_version": 123,
-            "providers": [1],
-            "date_creation": "",
-            "date_last_modified": "",
-            "description": "",
-            "previous_se_firmware_final_version": [100]
-        }))
-        .unwrap();
-        assert_eq!(osu.next_se_firmware_final_version, 123);
-
-        let resp: LatestFirmwareResponse =
-            serde_json::from_value(serde_json::json!({"result": "null"})).unwrap();
-        assert_eq!(resp.result, "null");
-        assert!(resp.se_firmware_osu_version.is_none());
-
-        let app: BitcoinAppInfo = serde_json::from_value(serde_json::json!({
+    fn apps() {
+        let app: AppInfo = serde_json::from_value(serde_json::json!({
             "versionId": 1234,
             "versionName": "Bitcoin",
             "versionDisplayName": "Bitcoin",
             "version": "2.1.3",
             "currencyId": "bitcoin",
-            "description": null,
-            "applicationType": "currency",
-            "dateModified": "",
-            "icon": "bitcoin",
-            "authorName": "Ledger",
-            "supportURL": null,
-            "contactURL": null,
-            "sourceURL": null,
             "hash": "00ff",
             "perso": "perso_11",
             "parentName": null,
@@ -793,14 +520,12 @@ mod tests {
             "delete": "nanox/2.2.3/bitcoin/app_2.1.3_del",
             "deleteKey": "nanox/2.2.3/bitcoin/app_2.1.3_del_key",
             "bytes": 90000,
-            "warning": null,
-            "isDevTools": false
         }))
         .unwrap();
         assert_eq!(app.delete, "nanox/2.2.3/bitcoin/app_2.1.3_del");
+        assert_eq!(app.firmware_key, "nanox/2.2.3/bitcoin/app_2.1.3_key");
 
-        let app2: BitcoinAppInfo = serde_json::from_value(serde_json::json!({
-            "versionId": 1234,
+        let app: AppInfo = serde_json::from_value(serde_json::json!({
             "versionName": "Bitcoin",
             "version": "2.1.3",
             "perso": "perso_11",
@@ -811,8 +536,6 @@ mod tests {
             "hash": "00ff",
         }))
         .unwrap();
-        assert!(app2.delete.is_empty());
-        assert_eq!(app.parent_name, None);
-        assert_eq!(app.bytes, Some(90000));
+        assert!(app.delete.is_empty());
     }
 }
