@@ -3,16 +3,22 @@ mod bitbox;
 use std::{
     env,
     io::{self, Write},
+    path::PathBuf,
     process,
+    time::Duration,
 };
 
 use ledger_manager::{
-    check_firmware_update_supported, current_firmware, firmware_update_resets_customization,
-    genuine_check_with_events, install_bitcoin_app_with_progress, latest_firmware,
+    check_firmware_update_supported, current_firmware, default_backup_dir, find_latest_backup,
+    firmware_update_resets_customization, genuine_check_with_events,
+    install_bitcoin_app_with_progress, latest_firmware,
     ledger_transport_hidapi::{hidapi::HidApi, TransportNativeHID},
-    list_installed_apps, open_bitcoin_app, open_device, repair_firmware,
-    update_bitcoin_app_with_progress, update_firmware, AppInstallStep, DeviceInfo, DeviceModel,
-    FirmwareUpdateStep, InstallErr, SocketEvent, UpdateErr,
+    list_installed_apps, load_backup, open_bitcoin_app, open_device, repair_firmware,
+    restore_device_settings, update_bitcoin_app_with_progress, update_firmware,
+    update_firmware_and_restore, AppInstallStep, BackupLocation, BackupStep, DeviceInfo,
+    DeviceModel, Error, FirmwareUpdateOptions, FirmwareUpdateStep, InstallErr, LanguageInstallStep,
+    LoadImageStep, RestoreReport, RestoreStep, SocketEvent, UpdateAndRestoreOptions,
+    UpdateAndRestoreStep, UpdateErr,
 };
 
 // Print on stderr and exit with 1.
@@ -36,6 +42,7 @@ enum Command {
     CheckFirmware,
     UpdateFirmware,
     RepairFirmware,
+    RestoreBackup,
 }
 
 impl Command {
@@ -72,6 +79,8 @@ impl Command {
             Some(Self::UpdateFirmware)
         } else if cmd_str == "repairfirm" {
             Some(Self::RepairFirmware)
+        } else if cmd_str == "restorebackup" {
+            Some(Self::RestoreBackup)
         } else {
             None
         }
@@ -251,6 +260,14 @@ fn check_firmware(ledger_api: &TransportNativeHID, usb_model: Option<DeviceModel
     }
 }
 
+/// The directory of the backups of the device settings: `LEDGER_BACKUP_DIR` or the default one.
+fn backup_dir() -> Option<PathBuf> {
+    env::var_os("LEDGER_BACKUP_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(default_backup_dir)
+}
+
 fn update_firm(mut hid_api: HidApi) {
     let (update, resets_customization) = {
         let (ledger_api, _) = ledger_api(&hid_api);
@@ -275,18 +292,195 @@ fn update_firm(mut hid_api: HidApi) {
         (update, resets)
         // The transport is dropped here: the update opens its own connections to the device.
     };
-    println!("WARNING: the applications installed on your device will be removed by the update. You will need to reinstall them afterwards (your funds are not affected, make sure you have your recovery phrase at hand).");
+
+    if env::var("LEDGER_NO_RESTORE").is_ok() {
+        println!("LEDGER_NO_RESTORE is set: the device settings won't be backed up nor restored.");
+        println!("WARNING: the applications installed on your device will be removed by the update. You will need to reinstall them afterwards (your funds are not affected, make sure you have your recovery phrase at hand).");
+        if resets_customization {
+            println!(
+                "NOTE: your device's language and lock screen picture may be reset by the update."
+            );
+        }
+        println!("Keep your device connected and unlocked during the whole update. It can take several minutes.");
+        let res = update_firmware(&mut hid_api, &update, |step| {
+            print_firmware_step(step, false)
+        });
+        match res {
+            Ok(_) => println!("Successfully updated the firmware. You can now reinstall the Bitcoin app with the installapp command."),
+            Err(e) => error!("\nError updating the firmware: {}", e),
+        }
+        return;
+    }
+
+    let backup_location = if env::var("LEDGER_NO_BACKUP_FILE").is_ok() {
+        println!("LEDGER_NO_BACKUP_FILE is set: the backup of the device settings is only kept in memory, it will be lost if the update is interrupted.");
+        BackupLocation::MemoryOnly
+    } else {
+        match backup_dir() {
+            Some(dir) => BackupLocation::Directory(dir),
+            None => error!("Could not determine where to save the backup of the device settings. Set LEDGER_BACKUP_DIR to a directory, or set LEDGER_NO_BACKUP_FILE=1 to update without saving the backup to a file."),
+        }
+    };
+    println!("The apps installed on your device will be removed by the update. Before the update, the list of installed apps, the language and the custom lock screen picture (if any) are backed up, and they are restored after the update. Your funds are not affected, but make sure you have your recovery phrase at hand.");
+    println!("NOTE: the data stored inside the apps is not restored. In particular the wallet policies registered in the Bitcoin app (multisig, Liana, ...) are lost: you may have to register your wallet again from your wallet software.");
     if resets_customization {
-        println!("NOTE: your device's language and lock screen may be reset by the update.");
+        println!("You will have to approve the backup and the restoration of the lock screen picture and of the language on your device.");
     }
     println!("Keep your device connected and unlocked during the whole update. It can take several minutes.");
 
-    let res = update_firmware(&mut hid_api, &update, |step| {
-        print_firmware_step(step, false)
-    });
+    let options = UpdateAndRestoreOptions {
+        backup_location,
+        firmware: FirmwareUpdateOptions::default(),
+    };
+    let res = update_firmware_and_restore(&mut hid_api, &update, &options, print_update_step);
     match res {
-        Ok(_) => println!("Successfully updated the firmware. You can now reinstall the Bitcoin app with the installapp command."),
-        Err(e) => error!("\nError updating the firmware: {}", e),
+        Ok(result) => {
+            println!("Successfully updated the firmware to {}.", result.device_info.version);
+            match (&result.report, &result.restore_error) {
+                (Some(report), _) => print_restore_report(report),
+                (None, Some(e)) => {
+                    println!("The settings could not be restored: {}", e);
+                    if let Some(path) = &result.backup_path {
+                        println!(
+                            "Restore them with: LEDGER_COMMAND=restorebackup LEDGER_BACKUP_FILE={}",
+                            path.display()
+                        );
+                    }
+                }
+                (None, None) => println!("There was no backup to restore. You can reinstall the Bitcoin app with the installapp command."),
+            }
+        }
+        Err(e @ Error::BackupNotSaved(_)) => error!(
+            "{}\nThe firmware update was NOT started. Fix the problem (or set LEDGER_BACKUP_DIR to another directory) and retry, or set LEDGER_NO_BACKUP_FILE=1 to update while keeping the backup in memory only.",
+            e
+        ),
+        Err(e) => error!(
+            "\nError updating the firmware: {}\nOnce the update is completed (run updatefirm or repairfirm again), restore the settings with the restorebackup command.",
+            e
+        ),
+    }
+}
+
+fn restore_backup(hid_api: HidApi) {
+    let (ledger_api, _) = ledger_api(&hid_api);
+    let path = match env::var_os("LEDGER_BACKUP_FILE").filter(|f| !f.is_empty()) {
+        Some(f) => PathBuf::from(f),
+        None => {
+            let info = device_info(&ledger_api);
+            let dir = match backup_dir() {
+                Some(d) => d,
+                None => error!("Set LEDGER_BACKUP_FILE to the backup file to restore."),
+            };
+            match find_latest_backup(&dir, info.target_id, Duration::MAX) {
+                Some((path, _)) => {
+                    println!("LEDGER_BACKUP_FILE is not set, using the latest backup of this device model.");
+                    path
+                }
+                None => error!(
+                    "No backup of this device found in {}. Set LEDGER_BACKUP_FILE to the backup file to restore.",
+                    dir.display()
+                ),
+            }
+        }
+    };
+    let backup = match load_backup(&path) {
+        Ok(b) => b,
+        Err(e) => error!("Error loading the backup {}: {}", path.display(), e),
+    };
+    println!("Restoring the backup {}:", path.display());
+    for line in backup.summary() {
+        println!("  {}", line);
+    }
+    match restore_device_settings(&ledger_api, &backup, print_restore_step) {
+        Ok(report) => print_restore_report(&report),
+        Err(e) => error!("Error restoring the backup: {}", e),
+    }
+}
+
+fn print_backup_step(step: BackupStep) {
+    match step {
+        BackupStep::ListingApps => println!(
+            "Backing up the list of installed apps. You might have to allow the Ledger manager on your device."
+        ),
+        BackupStep::QueryingApi => println!("Querying the Ledger API."),
+        BackupStep::FetchingLockScreen => println!(
+            "Backing up the lock screen picture. If your device asks for it, approve the backup on your device."
+        ),
+        BackupStep::FetchingLockScreenProgress { progress } => {
+            print_progress("Backing up the lock screen picture", progress)
+        }
+        BackupStep::Done => {}
+    }
+}
+
+fn print_restore_step(step: RestoreStep) {
+    match step {
+        RestoreStep::InstallingLanguage { language } => {
+            println!("Restoring the language of your device ({}).", language)
+        }
+        RestoreStep::Language(LanguageInstallStep::Downloading) => {
+            println!("Downloading the language pack.")
+        }
+        RestoreStep::Language(LanguageInstallStep::PermissionRequested) => {
+            println!("Please approve the language installation on your device.")
+        }
+        RestoreStep::Language(LanguageInstallStep::Installing { progress }) => {
+            print_progress("Installing the language", progress)
+        }
+        RestoreStep::RestoringLockScreen => println!("Restoring the lock screen picture."),
+        RestoreStep::LockScreen(LoadImageStep::LoadPermissionRequested) => {
+            println!("Please approve the lock screen picture restoration on your device.")
+        }
+        RestoreStep::LockScreen(LoadImageStep::Loading { progress }) => {
+            print_progress("Restoring the lock screen picture", progress)
+        }
+        RestoreStep::LockScreen(LoadImageStep::CommitPermissionRequested) => {
+            println!("\nPlease confirm the lock screen picture on your device.")
+        }
+        RestoreStep::ListingApps => println!(
+            "Reinstalling the apps. You might have to allow the Ledger manager on your device."
+        ),
+        RestoreStep::InstallingApp { name, index, total } => {
+            println!("Installing {} ({}/{}).", name, index, total)
+        }
+        RestoreStep::App(step) => print_app_step(step),
+        RestoreStep::Done { .. } => {}
+    }
+}
+
+fn print_update_step(step: UpdateAndRestoreStep) {
+    match step {
+        UpdateAndRestoreStep::Backup(step) => print_backup_step(step),
+        UpdateAndRestoreStep::BackupSaved { path } => {
+            println!("Backup of the device settings saved to {}.", path.display())
+        }
+        UpdateAndRestoreStep::BackupLoaded { path } => println!(
+            "Resuming an interrupted update. The settings will be restored from {}.",
+            path.display()
+        ),
+        UpdateAndRestoreStep::BackupSkipped { reason } => println!(
+            "WARNING: the device settings could not be backed up ({}). They won't be restored after the update.",
+            reason
+        ),
+        UpdateAndRestoreStep::Firmware(step) => print_firmware_step(step, false),
+        UpdateAndRestoreStep::Restore(step) => print_restore_step(step),
+    }
+}
+
+fn print_restore_report(report: &RestoreReport) {
+    println!("Restoration report:");
+    for line in report.lines() {
+        println!("  {}", line);
+    }
+    if !report.is_complete() {
+        println!("Some settings could not be restored. You can retry with the restorebackup command, or install the Bitcoin app with the installapp command.");
+    }
+    if report
+        .reinstalled_apps()
+        .iter()
+        .any(|a| *a == "Bitcoin" || *a == "Bitcoin Test")
+    {
+        println!("NOTE: the wallet policies registered in the Bitcoin app are not restored: you may have to register your wallet again from your wallet software.");
     }
 }
 
@@ -360,13 +554,14 @@ fn main() {
     let command = if let Some(cmd) = Command::get() {
         cmd
     } else {
-        error!("Invalid or no command specified. The command must be passed through the LEDGER_COMMAND env var (getinfo, genuinecheck, installapp, updateapp, openapp, checkfirm, updatefirm, repairfirm). Set LEDGER_TESTNET to use the Bitcoin testnet app instead where applicable.");
+        error!("Invalid or no command specified. The command must be passed through the LEDGER_COMMAND env var (getinfo, genuinecheck, installapp, updateapp, openapp, checkfirm, updatefirm, repairfirm, restorebackup). Set LEDGER_TESTNET to use the Bitcoin testnet app instead where applicable.");
     };
 
     let hid_api = hid_api();
     match command {
         Command::UpdateFirmware => return update_firm(hid_api),
         Command::RepairFirmware => return repair_firm(hid_api),
+        Command::RestoreBackup => return restore_backup(hid_api),
         _ => {}
     }
 
@@ -399,6 +594,8 @@ fn main() {
         Command::CheckFirmware => {
             check_firmware(&ledger_api, usb_model);
         }
-        Command::UpdateFirmware | Command::RepairFirmware => unreachable!("Handled above."),
+        Command::UpdateFirmware | Command::RepairFirmware | Command::RestoreBackup => {
+            unreachable!("Handled above.")
+        }
     }
 }
