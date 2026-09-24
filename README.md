@@ -15,7 +15,7 @@ Your hardware wallet Bitcoin companion.
 **WARNING: this is alpha software. Only use for testing.**
 
 A minimalistic software to update the firmware and the Bitcoin application of Ledger devices, and
-the firmware of BitBox02 devices, without the vendor's software.
+the firmware of BitBox02 and Blockstream Jade devices, without the vendor's software.
 
 ![](./bacca_software_screenshot.png)
 
@@ -43,13 +43,17 @@ non tech-savvy bitcoiners, yet. That said we hope to start pulling some of the f
 
 - Ledger Nano S, Nano S Plus, Nano X, Stax, Flex and Nano Gen5;
 - BitBox02 and BitBox02 Nova, Multi and Bitcoin-only editions, in firmware and bootloader mode (the
-  discontinued BitBox01 is not supported).
+  discontinued BitBox01 is not supported);
+- Blockstream Jade (v1), Jade (v1.1), Jade Plus and Jade Core, CLI only for now (the DIY boards
+  running the Jade firmware are not supported).
 
 Devices are only supported through USB. On Linux you need udev rules to access the devices as a
-regular user (for a Ledger, see [Ledger's udev rules](https://github.com/LedgerHQ/udev-rules)).
+regular user (for a Ledger, see [Ledger's udev rules](https://github.com/LedgerHQ/udev-rules)). A
+Jade is a USB serial port: your user must be allowed to use serial ports (usually by being in the
+`dialout` group, `uucp` on some distributions).
 
 This software can be used through a graphical interface (GUI), a command line interface (CLI), or
-as Rust libraries (`ledger_manager` and `bitbox_manager`).
+as Rust libraries (`ledger_manager`, `bitbox_manager` and `jade_manager`).
 
 ## GUI
 
@@ -76,12 +80,13 @@ If a Ledger firmware update was interrupted, run the GUI again: a Ledger in upda
 ## CLI
 
 The CLI takes its command from an environment variable: `LEDGER_COMMAND` for a Ledger,
-`BITBOX_COMMAND` for a BitBox. For instance:
+`BITBOX_COMMAND` for a BitBox, `JADE_COMMAND` for a Jade. For instance:
 ```
 LEDGER_COMMAND=checkfirm cargo run --locked -p ledger_manager_cli
 LEDGER_COMMAND=updatefirm cargo run --locked -p ledger_manager_cli
 LEDGER_TESTNET=1 LEDGER_COMMAND=installapp cargo run --locked -p ledger_manager_cli
 BITBOX_COMMAND=updatefirm cargo run --locked -p ledger_manager_cli
+JADE_COMMAND=updatefirm cargo run --locked -p ledger_manager_cli
 ```
 
 ### Ledger commands
@@ -128,6 +133,18 @@ Options:
 - `BITBOX_SHOW_HASH`: set to `1` (or `0`) to make the device show (or not) the firmware hash on
   every boot.
 - `BITBOX_FORCE`: reinstall the firmware even if it is already installed.
+
+### Jade commands
+
+- `getinfo`: show the model, firmware version, config and state of the device.
+- `checkfirm`: show the latest firmware release for the device.
+- `updatefirm`: update the device to the latest firmware release (see [below](#jade)).
+
+Options:
+- `JADE_PORT`: the serial port of the Jade (e.g. `/dev/ttyACM0`, `COM3`). By default, the single
+  serial port with the USB identifiers of a Jade.
+- `JADE_FORCE`: install the latest release even if it is not newer than the installed firmware
+  (reinstall, or downgrade).
 
 ## Ledger firmware update
 
@@ -183,6 +200,33 @@ unplug and replug it). The firmware releases after v9.26.2 are only signed for b
 and later, so a device with an old development bootloader can't be updated past v9.26.2: the update
 stops with an explanation. A development bootloader also waits for you to slide `<Continue>` on its
 "DEV DEVICE" screen to boot the firmware.
+
+## Jade
+
+Supported models, by the board type they report: Jade (v1) (`JADE`), Jade (v1.1) (`JADE_V1.1`),
+Jade Plus (`JADE_V2`) and Jade Core (`JADE_V2C`, a Jade Plus without camera and battery). The
+update works like Blockstream's
+[`update_jade_fw.py`](https://github.com/Blockstream/Jade/blob/master/update_jade_fw.py):
+- The firmware index of the device's model is fetched from the Blockstream firmware server
+  (`https://jadefw.blockstream.com/bin/<model>/index.json`), and the latest **stable full**
+  firmware with the same config as the installed one (with or without Bluetooth) is downloaded.
+  Beta firmwares and delta patches (smaller downloads, for a specific installed version) are not
+  used, to keep things simple. The downloaded file is checked against the hash in the index.
+- Versions older than the installed one are refused (unless `JADE_FORCE` is set). The device itself
+  refuses firmwares for another model, and those not signed by Blockstream (secure boot).
+- If the Jade is set up and locked, it asks for your PIN (see below).
+- The firmware is uploaded, and the Jade shows the new version and the firmware hash: check that
+  it is the one printed by Bacca (the hash of the uncompressed firmware, from the index) and
+  confirm on the device. The Jade checks this hash once the upload completes, and restarts on the
+  new firmware. Bacca then waits for it to come back to confirm the installed version.
+
+PIN and PIN server: your PIN is entered on the Jade, and never goes through the computer. To unlock,
+the Jade exchanges an encrypted message with Blockstream's blind PIN server, which the computer
+only relays. Bacca relays these requests only to the default Blockstream PIN server over HTTPS
+(`https://j8d.io`), not to other URLs the device may ask for: a Jade configured with a custom PIN
+server can't be unlocked by Bacca (unlock it with the software you set it up with, over USB, then
+run the update). Its Tor address can't be used either. A Jade that isn't set up yet is updated
+without PIN. The Jade refuses the update while a temporary wallet is loaded (restart it first).
 
 ## Dependencies and supply chain
 
