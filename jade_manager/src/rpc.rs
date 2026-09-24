@@ -51,8 +51,7 @@ impl Jade {
             .timeout(READ_TIMEOUT)
             .dtr_on_open(false)
             .open()?;
-        port.write_request_to_send(false)?;
-        port.write_data_terminal_ready(false)?;
+        clear_rts_dtr(port.as_mut());
         // Discard anything left from a previous session.
         port.clear(serialport::ClearBuffer::Input)?;
         Ok(Jade {
@@ -144,8 +143,17 @@ impl Jade {
 impl Drop for Jade {
     fn drop(&mut self) {
         // As `disconnect()` in `jade_serial.py`.
-        let _ = self.port.write_request_to_send(false);
-        let _ = self.port.write_data_terminal_ready(false);
+        clear_rts_dtr(self.port.as_mut());
+    }
+}
+
+/// Best effort: not all serial devices have modem control lines (e.g. pseudo terminals).
+fn clear_rts_dtr(port: &mut dyn serialport::SerialPort) {
+    if let Err(e) = port
+        .write_request_to_send(false)
+        .and_then(|_| port.write_data_terminal_ready(false))
+    {
+        log::debug!("Could not clear RTS and DTR: {}", e);
     }
 }
 
