@@ -30,7 +30,7 @@ const MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024;
 #[derive(Debug)]
 pub enum ReleaseError {
     Http(minreq::Error),
-    HttpStatus(i32, String),
+    HttpStatus(u16, String),
     Json(String),
     /// No release found for this product.
     NotFound(Product),

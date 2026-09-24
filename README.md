@@ -258,6 +258,21 @@ every boot, `BITBOX_FORCE` to reinstall the same firmware.
 BITBOX_COMMAND=updatefirm cargo run -p ledger_manager_cli
 ```
 
+## Dependencies and supply chain
+
+This software talks to hardware wallets, so we try to keep its dependencies in check:
+- `Cargo.lock` is committed and pins the exact version and checksum of every dependency. Build with
+  `--locked` (e.g. `cargo run --locked -p ledger_manager_gui`) so cargo fails instead of silently
+  picking other versions.
+- All dependencies come from crates.io, no git dependency (enforced by `cargo deny`, see
+  `deny.toml`).
+- `cargo audit` (RustSec advisory database, configured in `.cargo/audit.toml`) and `cargo deny check`
+  (advisories, sources, licenses) run in CI, next to `--locked` builds and tests.
+- When updating dependencies, we only lock versions published at least 14 days ago, except for
+  security fixes. Most malicious releases are detected and yanked within days.
+- The few advisories ignored are for unmaintained or unsound crates only used by the GUI toolkit
+  (iced 0.12), not by the libraries nor the CLI. They go away with an upgrade of iced.
+
 ## Future
 
 We are looking into people to help test this and confirm it works in as many scenarii as possible.

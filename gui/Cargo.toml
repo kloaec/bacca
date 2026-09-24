@@ -4,12 +4,12 @@ version = "0.1.0"
 authors = ["Pythcoiner <pythcoiner@proton.me>"]
 
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 readme.workspace = true
 
 [dependencies]
-ledger_manager = { path = "../ledger_manager" }
-bitbox_manager = { path = "../bitbox_manager" }
+ledger_manager = { path = "../ledger_manager", version = "0.1.0" }
+bitbox_manager = { path = "../bitbox_manager", version = "0.1.0" }
 
 iced_runtime = "0.12.1"
 iced = { version = "0.12.1",default-features = false, features = ["webgl", "image"] }

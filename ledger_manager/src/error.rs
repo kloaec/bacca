@@ -116,7 +116,7 @@ pub enum Error {
     /// Error from the HTTP client.
     Http(minreq::Error),
     /// The Ledger API returned an unexpected HTTP status.
-    Api { status: i32, url: String },
+    Api { status: u16, url: String },
     /// The Ledger API did not recognize the firmware of this device.
     FirmwareNotRecognized,
     /// The current MCU version of the device is unknown to the Ledger API.

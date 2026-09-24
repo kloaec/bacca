@@ -448,7 +448,9 @@ where
         let next = match msg.query.as_str() {
             "exchange" => {
                 let resp = session.exchange(&msg)?;
-                socket.send(tungstenite::Message::Text(serde_json::to_string(&resp)?))?;
+                socket.send(tungstenite::Message::Text(
+                    serde_json::to_string(&resp)?.into(),
+                ))?;
                 Next::Continue
             }
             "bulk" => {
