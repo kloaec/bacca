@@ -471,6 +471,11 @@ pub struct UpdateOptions {
     pub show_firmware_hash: Option<bool>,
     /// Reinstall even if the same firmware is already installed.
     pub force: bool,
+    /// Don't boot the intermediate firmwares whose purpose is to upgrade the bootloader, install
+    /// the next firmware directly instead. Needed for a development bootloader, which such an
+    /// intermediate refuses to replace: it then halts on "Development bootloader". The firmware
+    /// doesn't require the upgraded bootloader.
+    pub skip_bootloader_upgrade: bool,
 }
 
 impl Default for UpdateOptions {
@@ -479,6 +484,7 @@ impl Default for UpdateOptions {
             noise_config: Box::new(noise_config::NoiseConfigNoCache),
             show_firmware_hash: None,
             force: false,
+            skip_bootloader_upgrade: false,
         }
     }
 }
@@ -586,7 +592,15 @@ pub fn update_firmware(
     // Intermediates (by monotonic version) that were booted already during this upgrade.
     let mut booted: Vec<u32> = Vec::new();
     // Intermediates skipped because booting them did not have the expected effect.
-    let mut skipped: Vec<u32> = Vec::new();
+    let mut skipped: Vec<u32> = if options.skip_bootloader_upgrade {
+        releases::intermediates(product)
+            .iter()
+            .filter(|i| matches!(i.completion, IntermediateCompletion::BootloaderVersion(_)))
+            .map(|i| i.monotonic_version)
+            .collect()
+    } else {
+        Vec::new()
+    };
     for _ in 0..MAX_UPGRADE_STEPS {
         let handle = wait_for_device(&mut api, product, Duration::ZERO)?;
         if handle.mode == Mode::Firmware {

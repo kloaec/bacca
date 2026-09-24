@@ -170,7 +170,7 @@ fn report_progress(reporter: &Reporter, progress: Progress) {
         Progress::WaitingForIntermediateBoot { version } => {
             reporter.info(None);
             reporter.status(format!(
-                "Booting the intermediate firmware v{}, this can take a minute. Do not unplug the device. If your BitBox shows 'DEV DEVICE' (development bootloader), slide <Continue> (bottom) on the device to boot it.",
+                "Booting the intermediate firmware v{}, this can take a minute. Do not unplug the device. If your BitBox shows 'DEV DEVICE' (development bootloader), slide <Continue> (bottom) on the device to boot it. If it then stays on 'Development bootloader', unplug and replug it.",
                 version
             ))
         }

@@ -185,6 +185,7 @@ fn options() -> UpdateOptions {
         noise_config,
         show_firmware_hash,
         force: env::var_os("BITBOX_FORCE").is_some(),
+        skip_bootloader_upgrade: env::var_os("BITBOX_SKIP_BOOTLOADER_UPGRADE").is_some(),
     }
 }
 
@@ -236,7 +237,7 @@ fn print_progress(p: Progress) {
         Progress::Verifying => println!("Verifying..."),
         Progress::Rebooting => println!("Rebooting the device..."),
         Progress::WaitingForIntermediateBoot { version } => println!(
-            "Booting the intermediate firmware v{}, this can take a minute. Do not unplug the device. If your BitBox shows 'DEV DEVICE' (development bootloader), slide <Continue> (bottom) on the device to boot it.",
+            "Booting the intermediate firmware v{}, this can take a minute. Do not unplug the device. If your BitBox shows 'DEV DEVICE' (development bootloader), slide <Continue> (bottom) on the device to boot it. If it then stays on 'Development bootloader', unplug and replug it.",
             version
         ),
         Progress::BootloaderUpgradeSkipped {
