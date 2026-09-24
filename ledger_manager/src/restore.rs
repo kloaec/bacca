@@ -2,13 +2,14 @@
 //!
 //! A firmware update uninstalls all the apps, and may reset the language and the custom lock
 //! screen picture of the device. Like Ledger Live, before the update we back up:
-//! - the list of installed apps;
+//! - which of the Bitcoin and Bitcoin Test apps are installed (the other apps are not
+//!   reinstalled: this is a Bitcoin-only tool);
 //! - the language of the device;
 //! - the custom lock screen picture (Stax, Flex, Nano Gen5);
 //!
 //! and after the update we restore, in this order: the language (by installing the language pack
-//! for the new firmware), the lock screen picture, and the apps (from the catalog for the new
-//! firmware, along with their dependencies). This follows
+//! for the new firmware), the lock screen picture, and the Bitcoin apps (from the catalog for the
+//! new firmware). This follows
 //! https://github.com/LedgerHQ/ledger-live/blob/develop/apps/ledger-live-mobile/src/screens/FirmwareUpdate/useUpdateFirmwareAndRestoreSettings.ts
 //! and the desktop firmware update modal
 //! (https://github.com/LedgerHQ/ledger-live/tree/develop/apps/ledger-live-desktop/src/renderer/modals/UpdateFirmwareModal).
@@ -25,7 +26,10 @@
 
 use crate::{
     api::{apps_catalog, bitcoin_apps_by_hashes, AppInfo, FirmwareUpdateInfo},
-    apps::{install_app, list_installed_apps_raw, AppInstallStep, MANAGER_INSTALL_DELAY},
+    apps::{
+        install_app, is_bitcoin_app_name, list_installed_apps_raw, AppInstallStep,
+        MANAGER_INSTALL_DELAY,
+    },
     device::{connect, is_device_localization_supported, quit_app, DeviceInfo},
     error::Error,
     firmware::{
@@ -214,8 +218,8 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// The installed apps to back up, from the apps listed by the device and their matches (by hash)
-/// in the Ledger API, in the same order (`None` if unknown or not queried).
+/// The installed Bitcoin apps to back up, from the apps listed by the device and their matches
+/// (by hash) in the Ledger API, in the same order (`None` if unknown or not queried).
 ///
 /// Like Ledger Live (apps/listApps.ts), the entries with an empty `hash_code_data` (language
 /// packs, sideloaded apps) are not apps and are ignored. The name known by the Ledger API is used
@@ -240,6 +244,7 @@ pub(crate) fn apps_to_back_up(
                 hash: Some(hash),
             }
         })
+        .filter(|a| is_bitcoin_app_name(&a.name))
         .collect()
 }
 
@@ -807,7 +812,13 @@ fn restore_apps<P: FnMut(RestoreStep)>(
             )),
         );
     }
-    let names: Vec<String> = backup.apps.iter().map(|a| a.name.clone()).collect();
+    // Only the Bitcoin apps are reinstalled (a backup made by a previous version may list others).
+    let names: Vec<String> = backup
+        .apps
+        .iter()
+        .map(|a| a.name.clone())
+        .filter(|n| is_bitcoin_app_name(n))
+        .collect();
     if names.is_empty() {
         return (Vec::new(), None);
     }
@@ -899,7 +910,7 @@ fn restore_apps<P: FnMut(RestoreStep)>(
 
 /// Restore the settings of a device from a backup made before a firmware update: the language
 /// (installing the language pack for the new firmware, if it wasn't English), the custom lock
-/// screen picture, and the apps (from the catalog for the new firmware, with their dependencies).
+/// screen picture, and the Bitcoin apps (from the catalog for the new firmware).
 ///
 /// The user will have to approve the installation of the language, the loading of the picture,
 /// and to allow the Ledger manager on the device.
@@ -1272,20 +1283,23 @@ mod tests {
             .find(|a| a.version_name == "Ethereum")
             .unwrap();
         eth.hash = "cc".repeat(32);
+        // Only the Bitcoin apps are backed up.
         let apps = apps_to_back_up(&listed, &[Some(btc), Some(eth), None]);
         assert_eq!(
             apps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            vec!["Bitcoin", "Ethereum", "Custom"]
+            vec!["Bitcoin"]
         );
         assert_eq!(apps[0].version.as_deref(), Some("2.4.6"));
-        assert_eq!(apps[2].version, None);
-        assert_eq!(apps[2].hash, Some("dd".repeat(32)));
+        assert_eq!(apps[0].hash, Some("aa".repeat(32)));
         // Without API matches, the local names are used.
+        let mut listed = listed;
+        listed.push(app("Bitcoin Test", 1, 0xee));
         let apps = apps_to_back_up(&listed, &[]);
         assert_eq!(
             apps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            vec!["Bitcoin", "Local name", "Custom"]
+            vec!["Bitcoin", "Bitcoin Test"]
         );
+        assert_eq!(apps[1].version, None);
         // A match with another hash is not used.
         let mut wrong = catalog()
             .into_iter()

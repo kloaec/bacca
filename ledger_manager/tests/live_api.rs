@@ -142,3 +142,26 @@ fn live_apps_catalog() {
         println!("{model}: {} apps in the catalog", catalog.len());
     }
 }
+
+#[test]
+#[ignore]
+fn live_bitcoin_apps_have_no_dependency() {
+    // After a firmware update only the Bitcoin apps are reinstalled: check they don't depend on
+    // another app (`parentName`), so the dependencies don't need to be resolved.
+    for (model, info) in devices() {
+        let url = format!(
+            "https://manager.api.live.ledger.com/api/v2/apps/by-target?livecommonversion=38.0.0&provider=1&target_id={}&firmware_version_name={}",
+            info.target_id, info.version
+        );
+        let catalog: Vec<serde_json::Value> = minreq::get(url).send().unwrap().json().unwrap();
+        assert!(catalog.len() > 20, "{model}: {} apps", catalog.len());
+        for name in ["Bitcoin", "Bitcoin Test"] {
+            let app = catalog
+                .iter()
+                .find(|a| a["versionName"] == name)
+                .unwrap_or_else(|| panic!("{model}: {name} in the catalog"));
+            let parent = app["parentName"].as_str().unwrap_or_default();
+            assert!(parent.is_empty(), "{model}: {name} depends on {parent}");
+        }
+    }
+}
