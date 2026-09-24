@@ -33,7 +33,7 @@ use bootloader::{Bootloader, BootloaderError};
 use hww::{FirmwareDevice, HwwError, HwwInfo};
 use noise_config::NoiseConfig;
 pub use product::{Edition, Mode, Platform, Product, Version};
-use releases::{FirmwareRelease, NextStep, ReleaseError};
+use releases::{FirmwareRelease, IntermediateCompletion, NextStep, ReleaseError};
 use signed_firmware::{FirmwareFormatError, SighashScheme, SignedFirmware};
 
 /// How long to wait for the device to show up in bootloader mode after the user confirmed the
@@ -81,6 +81,10 @@ pub enum Error {
     Timeout(&'static str),
     /// The upgrade did not converge (e.g. an intermediate firmware did not complete).
     UpgradeStuck,
+    /// An intermediate firmware was booted but did not complete its upgrade step.
+    IntermediateNotBooted {
+        version: Version,
+    },
 }
 
 impl fmt::Display for Error {
@@ -130,6 +134,11 @@ impl fmt::Display for Error {
             ),
             Self::Timeout(what) => write!(f, "timeout {}", what),
             Self::UpgradeStuck => write!(f, "the upgrade did not complete"),
+            Self::IntermediateNotBooted { version } => write!(
+                f,
+                "the intermediate firmware v{} did not boot. If your BitBox shows 'DEV DEVICE' when it starts, slide <Continue> (bottom) to boot the firmware, then run the update again",
+                version
+            ),
         }
     }
 }
@@ -435,6 +444,14 @@ pub enum Progress {
     WaitingForIntermediateBoot {
         version: Version,
     },
+    /// The intermediate firmware upgrading the bootloader was booted, but the device came back
+    /// with its old bootloader. This is expected on a development bootloader, which the upgrade
+    /// refuses to replace. The upgrade continues without it: the target firmware is installed
+    /// directly (it does not require the new bootloader).
+    BootloaderUpgradeSkipped {
+        version: Version,
+        bootloader_version: Version,
+    },
     Done,
 }
 
@@ -566,6 +583,10 @@ pub fn update_firmware(
         reboot_to_bootloader(&mut api, &handle, options, progress)?;
     }
 
+    // Intermediates (by monotonic version) that were booted already during this upgrade.
+    let mut booted: Vec<u32> = Vec::new();
+    // Intermediates skipped because booting them did not have the expected effect.
+    let mut skipped: Vec<u32> = Vec::new();
     for _ in 0..MAX_UPGRADE_STEPS {
         let handle = wait_for_device(&mut api, product, Duration::ZERO)?;
         if handle.mode == Mode::Firmware {
@@ -580,6 +601,7 @@ pub fn update_firmware(
             current,
             bl.version(),
             target.firmware.firmware_version(),
+            &skipped,
         );
         if matches!(step, NextStep::BootIntermediate(_)) {
             // If the flash is erased (e.g. an interrupted install) there is nothing to boot:
@@ -590,8 +612,42 @@ pub fn update_firmware(
             }
             step = releases::adjust_for_erased(step, erased);
         }
+        if let NextStep::BootIntermediate(i) = step {
+            if booted.contains(&i.monotonic_version) {
+                // We already booted it, and the device is back in the bootloader without the
+                // expected effect.
+                match i.completion {
+                    IntermediateCompletion::BootloaderVersion(_) => {
+                        // The bootloader upgrade was refused. It always is on a development
+                        // bootloader ("Development bootloader" on the device's screen), see
+                        // `bootloader_upgrade_install_or_reboot()` in
+                        // bitbox02-firmware/src/bootloader_upgrade/firmware_installer.c. This
+                        // intermediate is only a bootloader installer, it can't be used as a
+                        // firmware: install the next firmware over it instead.
+                        log::warn!(
+                            "The bootloader upgrade of v{} did not happen (bootloader still v{}), skipping it.",
+                            i.version,
+                            bl.version()
+                        );
+                        progress(Progress::BootloaderUpgradeSkipped {
+                            version: i.version,
+                            bootloader_version: bl.version(),
+                        });
+                        skipped.push(i.monotonic_version);
+                        continue;
+                    }
+                    IntermediateCompletion::MonotonicVersionBump => {
+                        return Err(reboot_on_error(
+                            bl,
+                            Error::IntermediateNotBooted { version: i.version },
+                        ));
+                    }
+                }
+            }
+        }
         match step {
             NextStep::BootIntermediate(i) => {
+                booted.push(i.monotonic_version);
                 log::info!("Booting the intermediate firmware v{}", i.version);
                 progress(Progress::Rebooting);
                 bl.reboot()?;
@@ -611,6 +667,7 @@ pub fn update_firmware(
                     Err(e) => return Err(reboot_on_error(bl, e)),
                 };
                 flash(&bl, &firmware, Some(i.version), true, progress)?;
+                booted.push(i.monotonic_version);
                 progress(Progress::Rebooting);
                 bl.reboot()?;
                 progress(Progress::WaitingForIntermediateBoot { version: i.version });

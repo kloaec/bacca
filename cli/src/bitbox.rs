@@ -236,8 +236,15 @@ fn print_progress(p: Progress) {
         Progress::Verifying => println!("Verifying..."),
         Progress::Rebooting => println!("Rebooting the device..."),
         Progress::WaitingForIntermediateBoot { version } => println!(
-            "Booting the intermediate firmware v{}, this can take a minute. Do not unplug the device.",
+            "Booting the intermediate firmware v{}, this can take a minute. Do not unplug the device. If your BitBox shows 'DEV DEVICE' (development bootloader), slide <Continue> (bottom) on the device to boot it.",
             version
+        ),
+        Progress::BootloaderUpgradeSkipped {
+            version,
+            bootloader_version,
+        } => println!(
+            "Your BitBox kept its bootloader v{}: the bootloader upgrade of the intermediate firmware v{} was refused (it always is on a development bootloader). Installing the firmware directly instead.",
+            bootloader_version, version
         ),
         Progress::Done => println!("Done."),
     }

@@ -395,12 +395,15 @@ pub fn next_step(
     current_firmware_version: u32,
     bootloader_version: Version,
     target_firmware_version: u32,
+    skip: &[u32],
 ) -> NextStep {
     let intermediates = intermediates(product);
-    // Only consider intermediates older than the target.
+    // Only consider intermediates older than the target, and not skipped (identified by their
+    // monotonic version).
     let relevant = intermediates
         .iter()
-        .filter(|i| i.monotonic_version < target_firmware_version);
+        .filter(|i| i.monotonic_version < target_firmware_version)
+        .filter(|i| !skip.contains(&i.monotonic_version));
     for i in relevant.clone() {
         if i.boot_required(current_firmware_version, bootloader_version) {
             return NextStep::BootIntermediate(*i);
@@ -586,7 +589,7 @@ mod tests {
         let bl_new = Version::new(1, 2, 2);
         let latest = 55;
         // Tests mirroring TestNextFirmware / TestIntermediate* in the BitBoxApp firmware_test.go.
-        let step = |p, cur, bl| next_step(p, cur, bl, latest);
+        let step = |p, cur, bl| next_step(p, cur, bl, latest, &[]);
         for p in [BitBox02Multi, BitBox02BtcOnly] {
             assert!(
                 matches!(step(p, 1, bl_old), NextStep::InstallIntermediate(i) if i.monotonic_version == 36)
@@ -603,9 +606,9 @@ mod tests {
             assert_eq!(step(p, 50, bl_new), NextStep::InstallTarget);
             assert_eq!(step(p, 55, bl_new), NextStep::InstallTarget);
             // Target is itself older than the intermediates: no intermediate.
-            assert_eq!(next_step(p, 1, bl_old, 30), NextStep::InstallTarget);
+            assert_eq!(next_step(p, 1, bl_old, 30, &[]), NextStep::InstallTarget);
             // Target is the 9.17.1 intermediate itself.
-            assert_eq!(next_step(p, 1, bl_old, 36), NextStep::InstallTarget);
+            assert_eq!(next_step(p, 1, bl_old, 36, &[]), NextStep::InstallTarget);
         }
         for p in [BitBox02NovaMulti, BitBox02NovaBtcOnly] {
             assert!(
@@ -647,5 +650,27 @@ mod tests {
         assert!(i.boot_required(50, Version::new(1, 1, 9)));
         assert!(!i.boot_required(50, Version::new(1, 2, 2)));
         assert!(!i.boot_required(51, Version::new(1, 1, 9)));
+    }
+
+    // A development bootloader refuses the bootloader upgrade of v9.26.2: the device stays on its
+    // old bootloader with v9.26.2 (monotonic version 50) installed, which is only an installer.
+    // Once that intermediate is skipped, the target is installed directly over it.
+    #[test]
+    fn skip_refused_bootloader_upgrade() {
+        let bl_dev = Version::new(1, 0, 5);
+        for p in [Product::BitBox02Multi, Product::BitBox02BtcOnly] {
+            assert!(matches!(
+                next_step(p, 50, bl_dev, 55, &[]),
+                NextStep::BootIntermediate(i) if i.monotonic_version == 50
+            ));
+            assert_eq!(next_step(p, 50, bl_dev, 55, &[50]), NextStep::InstallTarget);
+            // An older device still needs v9.17.1 first, and v9.26.2 isn't installed again once
+            // skipped.
+            assert!(matches!(
+                next_step(p, 30, bl_dev, 55, &[50]),
+                NextStep::InstallIntermediate(i) if i.monotonic_version == 36
+            ));
+            assert_eq!(next_step(p, 37, bl_dev, 55, &[50]), NextStep::InstallTarget);
+        }
     }
 }
