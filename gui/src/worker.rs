@@ -10,11 +10,11 @@ use std::{sync::mpsc, thread, time::Duration};
 use bitbox_manager::{DeviceHandle, Edition};
 use ledger_manager::{ledger_transport_hidapi::hidapi::HidApi, FirmwareUpdateInfo};
 
-use crate::{bitbox, ledger};
+use crate::{bitbox, jade, ledger};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-pub const CONNECT_HINT: &str = "Please connect your Ledger or BitBox device and unlock it...";
+pub const CONNECT_HINT: &str = "Please connect your Ledger, BitBox or Jade device and unlock it...";
 
 /// An operation requested by the GUI.
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +73,7 @@ pub enum LatestFirmware {
 pub enum DeviceState {
     Ledger(LedgerState),
     Bitbox(BitboxState),
+    Jade(JadeState),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -127,6 +128,18 @@ pub struct BitboxState {
     /// The firmware version, or the bootloader state. `None` if the device could not be queried.
     pub firmware: Option<String>,
     pub bootloader: bool,
+    pub latest_firmware: LatestFirmware,
+}
+
+#[derive(Debug, Clone)]
+pub struct JadeState {
+    /// Jade, Jade Plus or Jade Core.
+    pub model: String,
+    pub firmware: String,
+    /// With Bluetooth or without radio.
+    pub config: String,
+    /// Locked, unlocked, not set up...
+    pub state: String,
     pub latest_firmware: LatestFirmware,
 }
 
@@ -194,13 +207,15 @@ pub fn start() -> (mpsc::Sender<Request>, async_channel::Receiver<Event>) {
     (request_sender, events)
 }
 
-/// A device found on USB.
+/// A device found on USB (or on a USB serial port).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Detected {
     /// By its HID path.
     Ledger(String),
     /// A change of mode (firmware or bootloader) makes it a different device, to query it again.
     Bitbox(DeviceHandle),
+    /// By its serial port.
+    Jade(String),
 }
 
 /// The device the GUI displays.
@@ -269,6 +284,7 @@ impl Worker {
         let (loaded, ledger_update) = match &device {
             Detected::Ledger(_) => ledger::load(&self.reporter),
             Detected::Bitbox(handle) => (bitbox::load(handle, &self.reporter), None),
+            Detected::Jade(port) => (jade::load(port, &self.reporter), None),
         };
         if loaded {
             if let Some(result) = self.result.take() {
@@ -306,6 +322,9 @@ impl Worker {
             }
             (Detected::Ledger(_), Request::RepairFirmware, _) => ledger::repair_firmware(r),
             (Detected::Bitbox(_), Request::UpdateFirmware { .. }, _) => bitbox::update_firmware(r),
+            (Detected::Jade(port), Request::UpdateFirmware { .. }, _) => {
+                jade::update_firmware(port, r)
+            }
             // The GUI doesn't offer anything else.
             _ => return,
         };
@@ -332,9 +351,14 @@ fn detect(current: Option<&Detected>) -> Option<Detected> {
         .ok()?;
     let ledgers = ledger_manager::list_ledger_devices(&api).into_iter();
     let bitboxes = bitbox_manager::list_devices(&api).into_iter();
+    // Only lists the ports, without opening them.
+    let jades = jade_manager::list_ports()
+        .map_err(|e| log::error!("Error listing the serial ports: {}", e))
+        .unwrap_or_default();
     let found: Vec<Detected> = ledgers
         .map(Detected::Ledger)
         .chain(bitboxes.map(Detected::Bitbox))
+        .chain(jades.into_iter().map(Detected::Jade))
         .collect();
     found
         .iter()

@@ -66,13 +66,14 @@ The GUI detects the connected device and shows its model, its firmware version a
 firmware available, with an "Update" button. For a Ledger it also shows whether it is genuine
 ("Check" button), and the installed and latest versions of the Bitcoin and Bitcoin Test apps, with
 "Install" and "Update" buttons. For a BitBox it shows the edition (there are no apps to install on
-a BitBox, see [BitBox](#bitbox)).
+a BitBox, see [BitBox](#bitbox)). For a Jade it shows the config (with Bluetooth or without radio)
+and whether it is locked or set up (no apps to install either: the firmware is the app).
 
 Before a firmware update, the GUI lists what the update implies and asks for confirmation. During
 an operation it shows what to do on the device (allow the Ledger manager, unlock the device...) and
 the codes to compare with the ones displayed by the device: the update identifier for a Ledger, the
-pairing code and the firmware hash for a BitBox. Keep the device plugged in until the operation
-completes.
+pairing code and the firmware hash for a BitBox, the firmware hash for a Jade (enter your PIN on
+the Jade when asked). Keep the device plugged in until the operation completes.
 
 If a Ledger firmware update was interrupted, run the GUI again: a Ledger in updater mode offers
 "Update" to finish it, and a Ledger in bootloader mode offers "Repair".

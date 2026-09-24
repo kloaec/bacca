@@ -9,7 +9,7 @@ use bitbox_manager::{
 
 /// Format a firmware hash in groups of 8 hex characters, easier to compare with the device's
 /// screen.
-fn format_hash(hash: &[u8; 32]) -> String {
+pub fn format_hash(hash: &[u8; 32]) -> String {
     let hex: Vec<String> = hash.iter().map(|b| format!("{:02x}", b)).collect();
     hex.chunks(4)
         .map(|c| c.concat())

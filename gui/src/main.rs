@@ -1,5 +1,6 @@
 mod bitbox;
 mod gui;
+mod jade;
 mod ledger;
 mod logger;
 mod theme;

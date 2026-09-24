@@ -5,8 +5,8 @@ use std::sync::mpsc;
 use crate::{
     theme::{self, Theme},
     worker::{
-        self, AppState, BitboxState, DeviceState, Event, Installed, LatestFirmware, LedgerMode,
-        LedgerState, Request, CONNECT_HINT,
+        self, AppState, BitboxState, DeviceState, Event, Installed, JadeState, LatestFirmware,
+        LedgerMode, LedgerState, Request, CONNECT_HINT,
     },
 };
 use bitbox_manager::Edition;
@@ -191,6 +191,14 @@ impl Bacca {
                     .push(bitbox_app_panel(bitbox))
                     .push(Space::with_height(10));
             }
+            // There is no Bitcoin app to install on the Jade either: the firmware is the app.
+            Some(DeviceState::Jade(jade)) => {
+                column = column
+                    .push(section_title("Device"))
+                    .push(Space::with_height(5))
+                    .push(jade_panel(jade, self.busy))
+                    .push(Space::with_height(10));
+            }
             None => {}
         }
         let status = (!self.status.is_empty()).then(|| {
@@ -245,6 +253,15 @@ impl Bacca {
                 lines.push("- Keep the device plugged in during the whole update. It can take a few minutes, the device may restart several times. The firmware hash will be shown here: compare it with the one shown by your BitBox.".to_string());
                 lines.push("- Before proceeding, make sure you have the backup of your wallet (recovery words or microSD card) at hand.".to_string());
                 (&bitbox.latest_firmware, lines)
+            }
+            Some(DeviceState::Jade(jade)) => {
+                let lines = vec![
+                    "- If your Jade is locked, you will have to enter your PIN on the device. Bacca relays the unlock requests to Blockstream's PIN server only: custom PIN servers are not supported.".to_string(),
+                    "- You will have to confirm the update on the device, after checking the version and the firmware hash it displays match the ones shown here.".to_string(),
+                    "- Keep the device plugged in and switched on during the whole update. It can take a few minutes, the device restarts at the end.".to_string(),
+                    "- Before proceeding, make sure you have the backup of your recovery phrase at hand.".to_string(),
+                ];
+                (&jade.latest_firmware, lines)
             }
             None => (&LatestFirmware::Unknown, Vec::new()),
         };
@@ -398,6 +415,24 @@ fn bitbox_panel(bitbox: &BitboxState, busy: bool) -> Element<'_> {
             info_row(
                 "Latest firmware:",
                 latest_firmware(&bitbox.latest_firmware, can_update)
+            ),
+        ]
+        .spacing(5),
+    )
+    .into()
+}
+
+fn jade_panel(jade: &JadeState, busy: bool) -> Element<'_> {
+    frame(
+        10,
+        column![
+            info_row("Model:", Text::new(&jade.model)),
+            info_row("Firmware:", Text::new(&jade.firmware)),
+            info_row("Config:", Text::new(&jade.config)),
+            info_row("State:", Text::new(&jade.state)),
+            info_row(
+                "Latest firmware:",
+                latest_firmware(&jade.latest_firmware, !busy)
             ),
         ]
         .spacing(5),

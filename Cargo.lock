@@ -1989,6 +1989,7 @@ dependencies = [
  "colored",
  "fern",
  "iced",
+ "jade_manager",
  "ledger_manager",
  "log",
 ]
